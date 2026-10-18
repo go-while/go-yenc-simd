@@ -1,13 +1,22 @@
-// Package yencsimd is a pure-Go yEnc decoder for raw NNTP article bodies,
-// with SIMD on amd64 (Go's simd/archsimd, GOEXPERIMENT=simd). It is a drop-in
-// for rapidyenc's rapidyenc_decode_incremental: same input, output, states and
-// end codes.
+// Package yencsimd decodes yEnc articles from Usenet (NNTP), in pure Go,
+// with SIMD on amd64 when built with GOEXPERIMENT=simd.
 //
-// It decodes "raw" data: NNTP dot-stuffing ("\r\n.." → "\r\n.") is undone, and
-// it stops at the end of the yEnc data ("\r\n=y", also dot-stuffed as
-// "\r\n.=y") or of the article ("\r\n.\r\n"). It can be fed in chunks: State
-// carries what the previous chunk ended in. Parsing the =ybegin/=ypart/=yend
-// lines and checking the CRC is up to the caller.
+// Most programs need one of two functions:
+//
+//   - Decode(article) for an article in memory: it returns the data and its
+//     Meta (name, size, part) and checks size and CRC32.
+//   - NewReader(r) to stream an article from an NNTP connection: pass the
+//     connection's *bufio.Reader after the "222" status line (with
+//     net/textproto: tp.R, not tp.DotReader()).
+//
+// Both expect the article as the server sends it: CRLF lines, dot-stuffed,
+// ending with a "." line.
+//
+// DecodeIncremental is the low-level step underneath, a drop-in for
+// rapidyenc's rapidyenc_decode_incremental: it decodes the yEnc data in chunks
+// of any size, undoes the dot-stuffing and stops at "=y" (the =yend line) or
+// at the end of the article. Parsing the =y lines and the CRC are then up to
+// the caller.
 //
 // The byte-wise decoder is a small state machine that matches rapidyenc's
 // scalar reference (decoder.cc, do_decode_end_scalar<isRaw=true>) state for
