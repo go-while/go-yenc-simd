@@ -21,10 +21,16 @@
 // The byte-wise decoder is a small state machine that matches rapidyenc's
 // scalar reference (decoder.cc, do_decode_end_scalar<isRaw=true>) state for
 // state. With GOEXPERIMENT=simd on amd64, vector loops decode 16, 32 or 64
-// bytes per step (AVX, AVX2, AVX-512 VBMI2); elsewhere it is plain Go.
+// bytes per step (AVX, AVX2, AVX-512 VBMI2); elsewhere it is plain Go, 16
+// bytes per step (two 64-bit words, SWAR).
 package yencsimd
 
-import "errors"
+import (
+	"encoding/binary"
+	"errors"
+	"math/bits"
+	"unsafe"
+)
 
 // State is what the bytes before the current position were. The values are
 // those of rapidyenc's RapidYencDecoderState, so they can be passed through.
@@ -66,16 +72,15 @@ func DecodeIncremental(dst, src []byte, state *State) (nDst, nSrc int, end End, 
 	return nDst, nSrc, end, nil
 }
 
-// decodeScalar is the decoder without SIMD: the state machine, with a byte
-// loop for runs of plain bytes.
+// decodeScalar is the decoder without SIMD: the state machine, with a word
+// loop (decodePlain) for everything inside a line. len(dst) >= len(src).
 func decodeScalar(dst, src []byte, state *State) (int, int, End) {
+	dst = dst[:len(src)] // the unchecked stores in decodePlain rely on it
 	st := *state
 	p, i, n := 0, 0, len(src)
 	for i < n {
 		if st == StateNone {
-			k := decodePlainScalar(dst[p:], src[i:])
-			i += k
-			p += k
+			p, i = decodePlain(dst, src, p, i)
 			if i >= n {
 				break
 			}
@@ -145,15 +150,115 @@ func step(st State, c byte, dst []byte, p int) (State, int, End) {
 	return StateNone, p + 1, EndNone
 }
 
-// decodePlainScalar decodes the leading plain bytes of src into dst and returns
-// how many there were. len(dst) >= len(src).
-func decodePlainScalar(dst, src []byte) int {
-	dst = dst[:len(src)]
-	for k, c := range src {
-		if special[c] {
-			return k
+// Words of 8 equal bytes, for 8 bytes at a time (SWAR).
+const (
+	ones  = 0x0101010101010101
+	highs = 0x8080808080808080
+	eqs   = ones * '='
+	crs   = ones * '\r'
+	lfs   = ones * '\n'
+	k42s  = ones * 42
+)
+
+// word decodes the 8 bytes of x: out has 42 subtracted from every byte, and
+// the lowest set bit of t is bit 7 of the first byte that is '=', '\r' or
+// '\n' (t is 0 if there is none; its higher bits mean nothing).
+//
+// A byte of x^eqs is 0 where x has '='. Minus 1, bit 7 of a byte is set
+// where the byte was 0, where it was above 0x80 (x had a byte >= 0x80 other
+// than '='|0x80) and in the bytes above the first 0, which get the borrow.
+// hx has the high bits that were clear in x, so the AND with it keeps only
+// the first case, and the bits below the first set one are exact. xh is x
+// with the high bit of every byte set, so subtracting 42 from its bytes never
+// borrows from the next byte: xh-k42s is x-42 in every byte, but with the
+// high bit set, which hx puts right.
+func word(x uint64) (out, t uint64) {
+	xh := x | highs
+	hx := xh ^ x
+	t = (x ^ eqs - ones) | (x ^ crs - ones) | (x ^ lfs - ones)
+	return (xh - k42s) ^ hx, t & hx
+}
+
+// decodePlain is decodeScalar in StateNone, from src[i] to dst[p]: plain bytes
+// 16 at a time, and escapes and line breaks that leave the state StateNone,
+// without the state machine. It returns the positions where the state machine
+// has to take over, or len(src). len(dst) >= len(src).
+//
+// What it does without the state machine is what the state machine does:
+// "=X" is an escaped X, unless X is '\r' (an escaped \r still starts a line
+// break); after "\r\n" a byte other than '.', '=', '\r' and '\n' is an
+// ordinary byte, so the line break is just dropped.
+//
+// The words with the bytes minus 42 are stored before the first special byte
+// is known, so dst gets up to 15 bytes past the plain run that are
+// overwritten later. The stores are unchecked (a checked store needs len(dst)
+// in a register, and with it the word loop spilled): the output never gets
+// ahead of the input, p <= i, so p+16 <= i+16 <= n <= len(dst) in the word
+// loop, p+8 <= i+8 <= n in the 8-byte step and p <= i < n for the bytes.
+func decodePlain(dst, src []byte, p, i int) (int, int) {
+	n := len(src)
+	dp := unsafe.Pointer(unsafe.SliceData(dst)) // unchecked: see above
+	for i < n-15 {
+		// word, inline (it is too big to inline twice): the first word, and
+		// the second only if the first has no special byte, so a short run
+		// costs one word
+		x0 := binary.LittleEndian.Uint64(src[i:])
+		xh0 := x0 | highs
+		hx0 := xh0 ^ x0
+		t0 := ((x0 ^ eqs - ones) | (x0 ^ crs - ones) | (x0 ^ lfs - ones)) & hx0
+		binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(dp, p))[:], (xh0-k42s)^hx0)
+		// the first special byte, if any: an escape or a line break (or
+		// something rarer) at src[i+k]
+		var k int
+		if t0 != 0 {
+			k = bits.TrailingZeros64(t0) >> 3
+		} else {
+			x1 := binary.LittleEndian.Uint64(src[i+8:])
+			xh1 := x1 | highs
+			hx1 := xh1 ^ x1
+			t1 := ((x1 ^ eqs - ones) | (x1 ^ crs - ones) | (x1 ^ lfs - ones)) & hx1
+			binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(dp, p+8))[:], (xh1-k42s)^hx1)
+			if t1 == 0 {
+				i += 16
+				p += 16
+				continue
+			}
+			k = 8 + bits.TrailingZeros64(t1)>>3
 		}
-		dst[k] = c - 42
+		i += k
+		p += k
+		if i+2 >= n {
+			break
+		}
+		s := src[i : i+3] // one bounds check
+		c, d, f := s[0], s[1], s[2]
+		if c == '=' && d != '\r' {
+			*(*byte)(unsafe.Add(dp, p)) = d - 42 - 64
+			p++
+			i += 2
+		} else if c == '\r' && d == '\n' && f != '.' && f != '=' && f != '\r' && f != '\n' {
+			i += 2
+		} else {
+			return p, i
+		}
 	}
-	return len(src)
+	// 8 more bytes, up to the first special byte
+	if i < n-7 {
+		out, t := word(binary.LittleEndian.Uint64(src[i:]))
+		binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(dp, p))[:], out)
+		k := bits.TrailingZeros64(t) >> 3 // 8 if none
+		i += k
+		p += k
+	}
+	// the last bytes, one at a time
+	for i < n {
+		c := src[i]
+		if special[c] {
+			break
+		}
+		*(*byte)(unsafe.Add(dp, p)) = c - 42
+		i++
+		p++
+	}
+	return p, i
 }
