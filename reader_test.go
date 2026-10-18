@@ -153,3 +153,55 @@ func FuzzDecode(f *testing.F) {
 		Decode(article)
 	})
 }
+
+// Read decodes straight into p when p is big enough and copies out of an
+// internal buffer when it is not: the output must be the same for any mix of
+// sizes, with any bufio.Reader size, and the data of a truncated article must
+// still come out before ErrTruncated.
+func TestReaderReadSizes(t *testing.T) {
+	data := randomData(7, 200_000)
+	good := singlePart(data, "sizes.bin")
+	truncated := good[:strings.Index(good, "=yend")] + ".\r\n"
+	patterns := [][]int{{1}, {100}, {4096}, {5000}, {32 << 10}, {1 << 20}, {0, 1, 5000, 3, 70_000, 512, 4096}}
+	buf := make([]byte, 1<<20)
+	for _, bufSize := range []int{16, 4 << 10, 64 << 10} {
+		for _, sizes := range patterns {
+			for _, c := range []struct {
+				article string
+				want    error
+			}{{good, io.EOF}, {truncated, ErrTruncated}} {
+				d := NewReader(bufio.NewReaderSize(strings.NewReader(c.article), bufSize))
+				var got []byte
+				var err error
+				for i := 0; err == nil; i++ {
+					var n int
+					n, err = d.Read(buf[:sizes[i%len(sizes)]])
+					got = append(got, buf[:n]...)
+				}
+				if err != c.want || !bytes.Equal(got, data) {
+					t.Fatalf("bufio %d, reads %v: err=%v, %d bytes, equal=%v", bufSize, sizes, err, len(got), bytes.Equal(got, data))
+				}
+				if m := d.Meta(); c.want == io.EOF && (!m.HasCRC || m.CRC32 != crc32.ChecksumIEEE(data)) {
+					t.Fatalf("bufio %d, reads %v: meta %+v", bufSize, sizes, m)
+				}
+			}
+		}
+	}
+}
+
+// Decode returns the data it decoded along with an error about it.
+func TestDecodeErrorsReturnData(t *testing.T) {
+	data := randomData(8, 30_000)
+	good := singlePart(data, "x.bin")
+	badCRC := strings.Replace(good, fmt.Sprintf("crc32=%08x", crc32.ChecksumIEEE(data)), "crc32=00000000", 1)
+	truncated := good[:strings.Index(good, "=yend")] + ".\r\n"
+	for _, c := range []struct {
+		name, article string
+		want          error
+	}{{"crc", badCRC, ErrCRC}, {"truncated", truncated, ErrTruncated}} {
+		got, m, err := Decode([]byte(c.article))
+		if !errors.Is(err, c.want) || !bytes.Equal(got, data) || m.Name != "x.bin" {
+			t.Fatalf("%s: err=%v, %d bytes, equal=%v, meta %+v", c.name, err, len(got), bytes.Equal(got, data), m)
+		}
+	}
+}
