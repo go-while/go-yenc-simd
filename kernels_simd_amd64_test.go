@@ -2,22 +2,23 @@
 
 package yencsimd
 
-import "simd/archsimd"
-
-// kernels lists the decode paths this CPU can run, fastest first.
-func kernels() []string {
+// cpuKernels lists the decode paths this CPU can run, fastest first: the
+// conditions decode() dispatches on, taken before any test changes them.
+var cpuKernels = func() []string {
 	var k []string
-	if archsimd.X86.AVX512VBMI2() {
+	if hasVBMI2 {
 		k = append(k, "avx512vbmi2")
 	}
-	if archsimd.X86.AVX2() {
+	if hasAVX2 {
 		k = append(k, "avx2")
 	}
-	if archsimd.X86.AVX() {
+	if hasAVX {
 		k = append(k, "avx")
 	}
 	return append(k, "scalar")
-}
+}()
+
+func kernels() []string { return cpuKernels }
 
 // withKernel runs f with the decoder limited to the named path.
 func withKernel(name string, f func()) {
