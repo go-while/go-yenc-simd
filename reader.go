@@ -96,7 +96,9 @@ func (d *Reader) Meta() Meta { return d.meta }
 
 // Read implements io.Reader. When p can take all that is buffered, or holds
 // 8 KiB or more, it decodes straight into p, so io.Copy (32 KiB pieces) and
-// io.ReadAll (once its buffer has grown) get the data without a copy.
+// io.ReadAll (once its buffer has grown) get the data without a copy. Read may
+// use p[n:] as scratch space, as io.Reader allows: bytes of p past n are not
+// preserved.
 func (d *Reader) Read(p []byte) (int, error) {
 	for len(d.out) == 0 {
 		if d.err != nil {
@@ -373,11 +375,11 @@ func Decode(article []byte) ([]byte, Meta, error) {
 	for {
 		line, more, ok := cutLine(rest)
 		if !ok {
-			return nil, m, ErrNoYbegin
+			return []byte{}, m, ErrNoYbegin
 		}
 		rest = more
 		if bytes.Equal(line, []byte(".")) {
-			return nil, m, ErrNoYbegin
+			return []byte{}, m, ErrNoYbegin
 		}
 		if !bytes.HasPrefix(line, []byte("=ybegin ")) {
 			continue
@@ -386,11 +388,11 @@ func Decode(article []byte) ([]byte, Meta, error) {
 		if m.Part > 0 {
 			part, more, ok := cutLine(rest)
 			if !ok {
-				return nil, m, ErrNoYbegin
+				return []byte{}, m, ErrNoYbegin
 			}
 			rest = more
 			if err := m.parsePart(part); err != nil {
-				return nil, m, err
+				return []byte{}, m, err
 			}
 		}
 		break

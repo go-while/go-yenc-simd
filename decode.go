@@ -64,6 +64,8 @@ var special = [256]bool{'=': true, '\r': true, '\n': true}
 // DecodeIncremental decodes src into dst, starting in *state, and sets *state
 // to the state after the last byte it read. It stops after an end sequence (see
 // End). dst must be at least len(src): the output is never longer than the input.
+// dst and src must not overlap: the decoder writes scratch bytes past the output
+// position, so in-place decoding is not supported.
 func DecodeIncremental(dst, src []byte, state *State) (nDst, nSrc int, end End, err error) {
 	if len(dst) < len(src) {
 		return 0, 0, EndNone, ErrDstTooSmall

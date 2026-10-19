@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	hasVBMI2 = archsimd.X86.AVX512VBMI2() && archsimd.X86.AVX512VPOPCNTDQ() // VPCOMPRESSB packs 64 bytes in one instruction; VPOPCNTQ counts them
+	hasVBMI2 = archsimd.X86.AVX512() && archsimd.X86.AVX512VBMI() && archsimd.X86.AVX512VBMI2() && archsimd.X86.AVX512VPOPCNTDQ() // VPCOMPRESSB packs 64 bytes, VPERMI2B shifts them, VPOPCNTQ counts them
 	hasAVX2  = archsimd.X86.AVX2()
 	hasAVX   = archsimd.X86.AVX()
 )
@@ -72,6 +72,7 @@ func decodeSIMD(dst, src []byte, state *State) (int, int, End) {
 				p, i = steps32(dst, src, p, i)
 			}
 			p, i = steps16(dst, src, p, i)
+			archsimd.ClearAVXUpperBits() // VZEROUPPER: the SSE code after us (crc32) must not pay for dirty upper halves
 			if i != start {
 				st = stateAfter(src, i)
 				continue
@@ -313,7 +314,7 @@ func decodeVBMI2(dst, src []byte, state *State) (int, int, End) {
 			dbase := unsafe.Pointer(unsafe.SliceData(dst))
 			sp := unsafe.Add(sbase, i)
 			dp := unsafe.Add(dbase, p)
-			last := uintptr(sbase) + uintptr(n-64) // where the last block that fits starts
+			last := unsafe.Add(sbase, n-64) // where the last block that fits starts
 			// lineX of the block before, for the first byte: no "\r\n=" or
 			// "\r\n." is pending in StateNone (that would be StateCRLFEQ or
 			// StateCRLFDT), so nothing is zero
@@ -354,7 +355,7 @@ func decodeVBMI2(dst, src []byte, state *State) (int, int, End) {
 				}
 				out.Compress(keepK).StoreArray((*[64]uint8)(dp))
 				cnt = int(zero2.SetElem(0, keep).OnesCount().GetElem(0))
-				if uintptr(sp)+64 > last {
+				if uintptr(sp)+64 > uintptr(last) {
 					i = int(uintptr(sp)-uintptr(sbase)) + 64
 					break
 				}
@@ -366,6 +367,7 @@ func decodeVBMI2(dst, src []byte, state *State) (int, int, End) {
 				// the last 1..63 bytes: one more block, overlapping the end
 				p, i = tailVBMI2(dst, src, p, i)
 			}
+			archsimd.ClearAVXUpperBits() // VZEROUPPER: the SSE code after us (crc32) must not pay for dirty upper halves
 			if i != start {
 				st = stateAfter(src, i)
 				continue
@@ -463,7 +465,10 @@ func steps16(dst, src []byte, p, i int) (int, int) {
 	sq := unsafe.Add(unsafe.Pointer(unsafe.SliceData(src)), i) // &src[i]
 	dq := unsafe.Add(unsafe.Pointer(unsafe.SliceData(dst)), p) // &dst[p]
 	last := unsafe.Add(unsafe.Pointer(unsafe.SliceData(src)), len(src)-24)
-	pair := unsafe.Add(unsafe.Pointer(unsafe.SliceData(src)), len(src)-48) // where a second vector still fits
+	var pair unsafe.Pointer // where a second vector still fits; nil (never reached) if none does
+	if len(src) >= 48 {
+		pair = unsafe.Add(unsafe.Pointer(unsafe.SliceData(src)), len(src)-48)
+	}
 	// the context at src[i]: steps32 may have stopped after a '=' or "\r\n"
 	notPlain := uint32(0)
 	if c := src[i-1]; c == '=' || c == '\n' && src[i-2] == '\r' {
