@@ -1,7 +1,7 @@
 # go-yenc-simd
 
 A fast yEnc decoder for Go, for articles from Usenet (NNTP). Pure Go, no cgo.
-With `GOEXPERIMENT=simd` on amd64 it uses AVX2 or AVX-512; everywhere else
+With `GOEXPERIMENT=simd` on amd64 it uses AVX, AVX2 or AVX-512; everywhere else
 it is plain Go.
 
 ```sh
@@ -81,7 +81,7 @@ GOEXPERIMENT=simd go build ./...
 | | |
 |---|---|
 | amd64 with `GOEXPERIMENT=simd` | AVX-512 VBMI2, AVX2 or AVX, chosen at run time |
-| anything else | plain Go (about 0.4–1.1 GB/s) |
+| anything else | plain Go, 16 bytes per step (about 1–3.5 GB/s) |
 
 `GOEXPERIMENT=simd` needs Go 1.27 and is an experiment, outside the Go 1
 compatibility promise. Without it the package builds and works the same,
@@ -108,12 +108,22 @@ dot-stuffed. It does not check the CRC.
 
 ## Speed
 
-750 KB article, decode loop only:
+750 KB article, median of 3 pinned runs of `go test -bench .`, in MB/s of
+input. rapidyenc is the C reference (animetosho/rapidyenc, gcc 14, same input,
+same core).
 
-| CPU | go-yenc-simd | rapidyenc (C) |
+| | Intel i7-10710U (AVX2), fixed 2 GHz | AMD EPYC 9B45 (Zen 5, AVX-512) |
 |---|---|---|
-| Intel i7-10710U (AVX2), capped at 2 GHz | 3.0 GB/s | 3.7 GB/s |
-| AMD EPYC 9B45 (Zen 5) | 25 GB/s (AVX-512), 14.8 GB/s (AVX2) | 17.4 GB/s |
+| `DecodeIncremental`, random data | 2.9 GB/s | 24.7 GB/s (AVX-512), 15.1 GB/s (AVX2) |
+| same, data that needs no escapes | 4.8 GB/s | 26.0 GB/s, 22.7 GB/s |
+| same, an escape in every second byte | 3.0 GB/s | 21.9 GB/s, 11.3 GB/s |
+| same, plain Go (no `GOEXPERIMENT=simd`) | 0.95 GB/s | 3.4 GB/s |
+| `Decode` (whole article, size and CRC checked) | 1.8 GB/s | 10.4 GB/s |
+| `Reader` on a 64 KiB `bufio.Reader` | 2.0 GB/s | 12.6 GB/s |
+| rapidyenc, random data | 3.8 GB/s | 17.3 GB/s (VBMI2), 18.8 GB/s (AVX2) |
+
+`Decode` and `Reader` include the CRC32 (`hash/crc32`: 10 GB/s on the i7,
+33 GB/s on the EPYC), which is now a large share of their time.
 
 ## How it works, and tests
 
