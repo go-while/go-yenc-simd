@@ -77,7 +77,10 @@ func DecodeIncremental(dst, src []byte, state *State) (nDst, nSrc int, end End, 
 // decodeScalar is the decoder without SIMD: the state machine, with a word
 // loop (decodePlain) for everything inside a line. len(dst) >= len(src).
 func decodeScalar(dst, src []byte, state *State) (int, int, End) {
-	dst = dst[:len(src)] // the unchecked stores in decodePlain rely on it
+	// decodePlain stores unchecked up to len(src): len(dst) >= len(src) is the
+	// caller's contract (DecodeIncremental checks it); this panics if even the
+	// capacity is short
+	dst = dst[:len(src)]
 	st := *state
 	p, i, n := 0, 0, len(src)
 	for i < n {
@@ -192,7 +195,7 @@ func word(x uint64) (out, t uint64) {
 // ordinary byte, so the line break is just dropped.
 //
 // The words with the bytes minus 42 are stored before the first special byte
-// is known, so dst gets up to 15 bytes past the plain run that are
+// is known, so dst gets up to 8 bytes past the plain run that are
 // overwritten later. The stores are unchecked (a checked store needs len(dst)
 // in a register, and with it the word loop spilled): the output never gets
 // ahead of the input, p <= i, so p+16 <= i+16 <= n <= len(dst) in the word
@@ -201,25 +204,18 @@ func decodePlain(dst, src []byte, p, i int) (int, int) {
 	n := len(src)
 	dp := unsafe.Pointer(unsafe.SliceData(dst)) // unchecked: see above
 	for i < n-15 {
-		// word, inline (it is too big to inline twice): the first word, and
-		// the second only if the first has no special byte, so a short run
-		// costs one word
-		x0 := binary.LittleEndian.Uint64(src[i:])
-		xh0 := x0 | highs
-		hx0 := xh0 ^ x0
-		t0 := ((x0 ^ eqs - ones) | (x0 ^ crs - ones) | (x0 ^ lfs - ones)) & hx0
-		binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(dp, p))[:], (xh0-k42s)^hx0)
+		// the first word, and the second only if the first has no special
+		// byte, so a short run costs one word
+		out0, t0 := word(binary.LittleEndian.Uint64(src[i:]))
+		binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(dp, p))[:], out0)
 		// the first special byte, if any: an escape or a line break (or
 		// something rarer) at src[i+k]
 		var k int
 		if t0 != 0 {
 			k = bits.TrailingZeros64(t0) >> 3
 		} else {
-			x1 := binary.LittleEndian.Uint64(src[i+8:])
-			xh1 := x1 | highs
-			hx1 := xh1 ^ x1
-			t1 := ((x1 ^ eqs - ones) | (x1 ^ crs - ones) | (x1 ^ lfs - ones)) & hx1
-			binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(dp, p+8))[:], (xh1-k42s)^hx1)
+			out1, t1 := word(binary.LittleEndian.Uint64(src[i+8:]))
+			binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(dp, p+8))[:], out1)
 			if t1 == 0 {
 				i += 16
 				p += 16

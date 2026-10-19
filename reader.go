@@ -49,7 +49,10 @@ type Meta struct {
 // Read returns the decoded data. At the end it checks the sizes and the
 // CRC32 and returns io.EOF, or ErrSize / ErrCRC / ErrTruncated / ErrNoYbegin.
 // By then it has read through the closing "." line (or to the end of the
-// input), so an NNTP connection is ready for its next command.
+// input), so an NNTP connection is ready for its next command. A malformed
+// header (a part without an =ypart line, or another =y line in the data)
+// gives a plain error; after it the input is still inside the article, so
+// drop the connection or read to the "." line yourself.
 type Reader struct {
 	r    *bufio.Reader
 	meta Meta
@@ -366,9 +369,9 @@ func truncate(b []byte) []byte {
 // size and CRC32. It returns the same errors as Reader, with the data decoded
 // up to the error.
 //
-// The data is decoded in one step into one buffer of the size of the yEnc
-// data (the output is never longer), so the returned slice has some spare
-// capacity: about 3% for a typical post.
+// The data is decoded in one step into a buffer as long as the rest of the
+// article after the header lines (the output is never longer), so the returned
+// slice has some spare capacity: about 3% for a typical post.
 func Decode(article []byte) ([]byte, Meta, error) {
 	var m Meta
 	rest := article

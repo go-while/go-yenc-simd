@@ -20,11 +20,11 @@ var benchBody, benchSize = func() ([]byte, int) {
 
 // benchInputs are articles of ~750 KB of data that stress different paths:
 // random128 is benchBody (an escape every ~60 bytes, a line break every
-// 130), text encodes to plain bytes only (line breaks are the only
+// 130), plain encodes to plain bytes only (line breaks are the only
 // specials), escapes has an escape in every second byte.
 var benchInputs = []benchInput{
 	{"random128", benchBody, benchSize},
-	benchInputFrom("text", 9, func(r *rand.Rand, i int) byte { return benchPlain(r) }),
+	benchInputFrom("plain", 9, func(r *rand.Rand, i int) byte { return benchPlain(r) }),
 	benchInputFrom("escapes", 10, func(r *rand.Rand, i int) byte {
 		if i%2 == 1 {
 			return []byte{214, 224, 227, 19}[r.IntN(4)] // encode to NUL, \n, \r, '='

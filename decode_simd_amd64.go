@@ -406,6 +406,9 @@ func tailVBMI2(dst, src []byte, p, i int) (int, int) {
 
 	n := len(src)
 	s := n - 64
+	if i <= s || i >= n {
+		return p, i // outside its range: the state machine finishes
+	}
 	ov := uint(i - s)
 	v := archsimd.LoadUint8x64Array((*[64]uint8)(src[s:]))
 	b1 := archsimd.LoadUint8x64Array((*[64]uint8)(src[s-1:]))

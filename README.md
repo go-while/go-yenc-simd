@@ -50,10 +50,10 @@ for the next command.
 
 Each step decodes what the `bufio.Reader` has buffered (never reading past
 the article), straight into the caller's buffer when that can take it or
-holds 8 KiB or more, as `io.Copy`'s does. So the buffer size sets how much
+holds 8 KiB or more (`io.Copy`'s 32 KiB buffer does). So the buffer size sets how much
 work a step does and how often the connection is read: `textproto.NewConn`
 uses the 4 KiB default; `textproto.NewReader(bufio.NewReaderSize(conn,
-64<<10))` makes bigger steps and 16 times fewer reads.
+64<<10))` makes bigger steps and up to 16 times fewer reads.
 
 **Don't use `tp.DotReader()`.** It removes NNTP's dot-stuffing (`..` at a
 line start → `.`), and the decoder does that too, so a line that really
