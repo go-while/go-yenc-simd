@@ -112,8 +112,8 @@ dot-stuffed. It does not check the CRC.
 
 | CPU | go-yenc-simd | rapidyenc (C) |
 |---|---|---|
-| Intel i7-10710U (AVX2), capped at 2 GHz | 1.8 GB/s | 3.7 GB/s |
-| AMD EPYC 9B45 (Zen 5) | 11 GB/s (AVX-512), 7.4 GB/s (AVX2) | 17.4 GB/s |
+| Intel i7-10710U (AVX2), capped at 2 GHz | 3.0 GB/s | 3.7 GB/s |
+| AMD EPYC 9B45 (Zen 5) | 25 GB/s (AVX-512), 14.8 GB/s (AVX2) | 17.4 GB/s |
 
 ## How it works, and tests
 

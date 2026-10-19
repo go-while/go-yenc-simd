@@ -5,6 +5,7 @@ package yencsimd
 import (
 	"math/bits"
 	"simd/archsimd"
+	"sync"
 	"unsafe"
 )
 
@@ -27,46 +28,6 @@ func Kernel() string {
 	return "scalar"
 }
 
-// lut holds the tables of the vector loops in one struct, so that one
-// register addresses all of them.
-//
-// lo[m] / hi[m] are VPSHUFB indices that pack the bytes kept by mask m (bit
-// set = keep) of the low / high 8 bytes of a vector to the front. An entry is
-// 8 bytes, so its address is base + m*8 (one LEA); VPSHUFB reads 16, the
-// other 8 are the next entry and shuffle garbage into the output bytes 8-15,
-// which a later store overwrites. hi[255] reads into count.
-//
-// count[m] is the number of bits set in m. A table, not bits.OnesCount: its
-// fallback call (for CPUs without POPCNT) made the compiler reload every
-// vector constant in the loop.
-var lut struct {
-	lo, hi [256][8]int8
-	count  [256]uint8
-}
-
-func init() {
-	for m := range 256 {
-		lut.count[m] = uint8(bits.OnesCount8(uint8(m)))
-		k := 0
-		for b := range 8 {
-			if m&(1<<b) != 0 {
-				lut.lo[m][k] = int8(b)
-				lut.hi[m][k] = int8(b + 8)
-				k++
-			}
-		}
-		for ; k < 8; k++ {
-			lut.lo[m][k] = -1
-			lut.hi[m][k] = -1
-		}
-	}
-}
-
-// shuffle returns the lo / hi (off = 0 / 1) index vector for mask m.
-func shuffle(off int, m uint32) archsimd.Int8x16 {
-	return archsimd.LoadInt8x16Array((*[16]int8)(unsafe.Add(unsafe.Pointer(&lut), (uintptr(off)<<11)+uintptr(m)<<3)))
-}
-
 func decode(dst, src []byte, state *State) (int, int, End) {
 	switch {
 	case hasVBMI2:
@@ -78,12 +39,13 @@ func decode(dst, src []byte, state *State) (int, int, End) {
 }
 
 // decodeSIMD is the state machine with vector loops. Once in StateNone it
-// decodes 32 bytes per step (AVX2, steps32), then 16 (AVX, steps16) near the
-// end of src, without branching on the data: plain bytes, escapes ('=' +
-// byte), line breaks and stuffed dots ("\r\n." drops the dot). Each step
-// works out escapes and line starts from loads one and two bytes back, so a
-// block may start or end anywhere, even inside "\r\n" or after '='. A block
-// with anything the vector code doesn't do ends the loops: "==" (which '='
+// decodes 64 bytes per step (AVX2, steps32), then 32 or 16 (AVX, steps16)
+// near the end of src: plain bytes, escapes ('=' + byte), line breaks and
+// stuffed dots ("\r\n." drops the dot). A step without a '=', '\r' or '\n'
+// is just stored minus 42 (the one branch on the data); the others work out
+// escapes and line starts from loads one and two bytes back, so a block may
+// start or end anywhere, even inside "\r\n" or after '='. A block with
+// anything the vector code doesn't do ends the loops: "==" (which '='
 // escapes which?), an escaped \r or \n (invalid yEnc; rapidyenc has quirks
 // for it) and the end sequences "\r\n=y", "\r\n.\r", "\r\n.=". The state
 // machine takes it from there, one byte at a time.
@@ -97,6 +59,7 @@ func decode(dst, src []byte, state *State) (int, int, End) {
 // on the stack, and a bounds check or a load of hasAVX2 per block costs
 // more than the call.
 func decodeSIMD(dst, src []byte, state *State) (int, int, End) {
+	packOnce.Do(fillPack)
 	st := *state
 	p, i, n := 0, 0, len(src)
 	for i < n {
@@ -127,72 +90,170 @@ func decodeSIMD(dst, src []byte, state *State) (int, int, End) {
 	return p, n, EndNone
 }
 
-// steps32 decodes 32 bytes per step from src[i] with AVX2 while 64 bytes are
+// pack holds the tables of the AVX2 and AVX loops in one struct, so that one
+// register addresses both: 576 KiB, filled by fillPack before the first
+// decode (0.2 ms on a 2 GHz Comet Lake, 0.06 ms on a Zen 5; a CPU with
+// AVX-512 VBMI2 never needs it).
+//
+// idx[m] are VPSHUFB indices that pack the bytes NOT in the low 15 bits of
+// drop mask m (bit set = dropped) of a 16-byte lane to the front, byte 15
+// right after them: whether byte 15 is dropped only changes the count, not
+// where the others go, so the table has 2^15 entries, not 2^16. The bytes
+// after are garbage (stale indices, 16..30: VPSHUFB uses their low 4 bits),
+// overwritten by the next store.
+//
+// cnt[m] is the number of bits clear in the 16-bit mask m: the bytes a lane
+// keeps. A table, not bits.OnesCount: its fallback call (for CPUs without
+// POPCNT) made the compiler reload every vector constant in the loop.
+var pack struct {
+	idx [1 << 15][16]int8
+	cnt [1 << 16]uint8
+}
+
+var packOnce sync.Once
+
+// fillPack fills pack. idx[m] is byte 0 if m keeps it, then idx[m>>1] with
+// every index one higher: the kept bytes of m>>1 are those of m moved down
+// one, and its trailing 15 becomes a 16 at a garbage position.
+func fillPack() {
+	const ones = 0x0101010101010101
+	for k := range 16 {
+		pack.idx[0][k] = int8(k)
+	}
+	for m := 1; m < 1<<15; m++ {
+		src := (*[2]uint64)(unsafe.Pointer(&pack.idx[m>>1]))
+		lo, hi := src[0]+ones, src[1]+ones
+		if m&1 == 0 {
+			lo, hi = lo<<8, hi<<8|lo>>56
+		}
+		dst := (*[2]uint64)(unsafe.Pointer(&pack.idx[m]))
+		dst[0], dst[1] = lo, hi
+	}
+	pack.cnt[0] = 16
+	for m := 1; m < 1<<16; m++ {
+		pack.cnt[m] = pack.cnt[m>>1] - uint8(m&1)
+	}
+}
+
+// nibYCR is a VPSHUFB table on the low nibble of a byte that gives 'y' or
+// '\r' where the byte can be one: x == nibYCR[x&15] is x in {'y', '\r'}.
+// (0x80 never equals a byte with the high bit clear, and VPSHUFB gives 0 for
+// a byte with it set.)
+var nibYCR = func() (t [32]uint8) {
+	for i := range t {
+		t[i] = 0x80
+	}
+	for _, c := range []byte{'y', '\r'} {
+		t[c&15], t[16+c&15] = c, c
+	}
+	return
+}()
+
+// nibCRLF is the same for '\r' and '\n': x == nibCRLF[x&15] is x in
+// {'\r', '\n'}, one instruction less than two compares. steps16 uses it;
+// in steps32 the register it takes made the compiler spill, which cost more.
+var nibCRLF = func() (t [32]uint8) {
+	for i := range t {
+		t[i] = 0x80
+	}
+	for _, c := range []byte{'\r', '\n'} {
+		t[c&15], t[16+c&15] = c, c
+	}
+	return
+}()
+
+// steps32 decodes 64 bytes per step from src[i] with AVX2 while 72 bytes are
 // left and no block needs the state machine (see decodeSIMD). The caller
 // guarantees the state machine invariant at i.
 //
-// A block is packed with four shuffles from lut, one per 8 bytes, each
-// followed by a 16-byte store at the output position so far; the stores
-// after the first overwrite the garbage of the one before. There is no
-// branch on the data (a branch on the number of special bytes in a block is
-// mispredicted for one block in five with random data, and the flush costs
-// more than the shuffles save).
+// A step is two 32-byte vectors. If neither has a '=', '\r' or '\n', and the
+// byte before the step is plain (notPlain, from the step before: a step that
+// ends in a special byte, or in a stuffed dot, which is harmless), the output
+// is the 64 bytes minus 42. Otherwise each vector is packed with two shuffles
+// from pack, one per 16 bytes, each followed by a 16-byte store at the output
+// position so far; the second store overwrites the garbage of the first. With
+// random data a step in five takes the fast path, so the branch is
+// mispredicted that often; with text almost every step does.
 //
-// Bounds (unchecked loads and stores; i+64 <= n = len(src) <= len(dst),
-// p <= i, i >= 2): the loads are src[i-2:i+33), the stores reach dst[p+40).
+// Bounds (unchecked loads and stores; i+72 <= n = len(src) <= len(dst),
+// p <= i, i >= 2): the loads are src[i-2:i+65), the stores reach dst[p+64).
 func steps32(dst, src []byte, p, i int) (int, int) {
-	if len(src) < 64 {
+	if len(src) < 72 {
 		return p, i
 	}
 	eq := archsimd.BroadcastUint8x32('=')
 	cr := archsimd.BroadcastUint8x32('\r')
 	lf := archsimd.BroadcastUint8x32('\n')
 	dot := archsimd.BroadcastUint8x32('.')
-	ky := archsimd.BroadcastUint8x32('y')
 	k42 := archsimd.BroadcastUint8x32(42)
 	k64 := archsimd.BroadcastUint8x32(64)
+	yCR := archsimd.LoadUint8x32Array(&nibYCR)
 	load := func(q unsafe.Pointer, off int) archsimd.Uint8x32 {
 		return archsimd.LoadUint8x32Array((*[32]uint8)(unsafe.Add(q, off)))
 	}
-	tab := unsafe.Pointer(&lut)
-	shuf := func(off uintptr, m uint32) archsimd.Int8x16 { // lut.lo[m] (off 0) or lut.hi[m]
-		return archsimd.LoadInt8x16Array((*[16]int8)(unsafe.Add(tab, uintptr(m)<<3+off)))
+	idx8 := (*[1 << 16][8]int8)(unsafe.Pointer(&pack.idx)) // pack.idx in 8-byte halves: an index the CPU can scale
+	idx := func(m uint32) archsimd.Int8x16 {               // pack.idx[m&0x7fff]
+		return archsimd.LoadInt8x16Array((*[16]int8)(unsafe.Pointer(&idx8[(m&0x7fff)<<1])))
 	}
-	count := func(m uint32) int { return int(*(*uint8)(unsafe.Add(tab, unsafe.Offsetof(lut.count)+uintptr(m)))) }
+	cnt := func(m uint32) int { return int(pack.cnt[m&0xffff]) }
 	sq := unsafe.Add(unsafe.Pointer(unsafe.SliceData(src)), i) // &src[i]
 	dq := unsafe.Add(unsafe.Pointer(unsafe.SliceData(dst)), p) // &dst[p]
-	last := unsafe.Add(unsafe.Pointer(unsafe.SliceData(src)), len(src)-64)
+	last := unsafe.Add(unsafe.Pointer(unsafe.SliceData(src)), len(src)-72)
+	notPlain := uint32(0) // the caller guarantees a plain byte before src[i]
 	for uintptr(sq) <= uintptr(last) {
-		v := load(sq, 0)
-		b1 := load(sq, -1) // the byte before each byte
-		b2 := load(sq, -2) // and the one before that
-		a1 := load(sq, 1)  // the byte after
-		isEq, isDot := v.Equal(eq), v.Equal(dot)
-		ctl := isEq.Or(v.Equal(cr)).Or(v.Equal(lf)) // '=', '\r', '\n' are never output
-		esc := b1.Equal(eq)                         // escaped by the byte before
-		line := b1.Equal(lf).And(b2.Equal(cr))      // right after "\r\n"
-		// "==" (the second '=' would be escaped), an escaped \r or \n,
-		// "\r\n=y", "\r\n.\r" and "\r\n.="
-		bad := esc.And(ctl).
-			Or(line.And(isEq).And(a1.Equal(ky))).
-			Or(line.And(isDot).And(a1.Equal(cr).Or(a1.Equal(eq))))
-		if !bad.ToInt8x32().IsZero() {
-			break
+		v0, v1 := load(sq, 0), load(sq, 32)
+		ctl0 := v0.Equal(eq).Or(v0.Equal(cr)).Or(v0.Equal(lf)) // '=', '\r', '\n' are never output
+		ctl1 := v1.Equal(eq).Or(v1.Equal(cr)).Or(v1.Equal(lf))
+		if ctl0.Or(ctl1).ToBits()|notPlain == 0 {
+			v0.Sub(k42).StoreArray((*[32]uint8)(dq))
+			v1.Sub(k42).StoreArray((*[32]uint8)(unsafe.Add(dq, 32)))
+			dq = unsafe.Add(dq, 64)
+		} else {
+			// the first vector
+			b1 := load(sq, -1)  // the byte before each byte
+			b2 := load(sq, -2)  // and the one before that
+			a1 := load(sq, 1)   // the byte after
+			esc := b1.Equal(eq) // escaped by the byte before
+			// right after "\r\n", a '=' or '.'
+			ld := b1.Equal(lf).And(b2.Equal(cr)).And(v0.Equal(eq).Or(v0.Equal(dot)))
+			// "==" (the second '=' would be escaped), an escaped \r or \n;
+			// "\r\n=y", "\r\n.\r" and "\r\n.=" (end sequences: a line-start
+			// '=' or '.' before 'y', '\r' or '='; "\r\n.y", "\r\n=\r" and
+			// "\r\n==" are flagged too, needlessly but harmlessly)
+			bad := esc.And(ctl0).Or(ld.And(a1.Equal(yCR.PermuteOrZeroGrouped(a1.AsInt8x32())).Or(a1.Equal(eq))))
+			if !bad.ToInt8x32().IsZero() {
+				break
+			}
+			drop := ctl0.Or(ld).ToBits() // not output: ctl and the stuffed dot
+			// escaped bytes lose 42+64, the others 42
+			out := v0.Sub(k42).Sub(k64.Masked(esc))
+			out.GetLo().PermuteOrZero(idx(drop)).StoreArray((*[16]uint8)(dq))
+			dq = unsafe.Add(dq, cnt(drop))
+			drop >>= 16
+			out.GetHi().PermuteOrZero(idx(drop)).StoreArray((*[16]uint8)(dq))
+			dq = unsafe.Add(dq, cnt(drop))
+			// the second vector, the same (loaded again: a register less to keep)
+			v1 = load(sq, 32)
+			b1 = load(sq, 31)
+			b2 = load(sq, 30)
+			a1 = load(sq, 33)
+			esc = b1.Equal(eq)
+			ld = b1.Equal(lf).And(b2.Equal(cr)).And(v1.Equal(eq).Or(v1.Equal(dot)))
+			bad = esc.And(ctl1).Or(ld.And(a1.Equal(yCR.PermuteOrZeroGrouped(a1.AsInt8x32())).Or(a1.Equal(eq))))
+			if !bad.ToInt8x32().IsZero() {
+				sq = unsafe.Add(sq, 32) // the first vector is done
+				break
+			}
+			drop = ctl1.Or(ld).ToBits()
+			out = v1.Sub(k42).Sub(k64.Masked(esc))
+			out.GetLo().PermuteOrZero(idx(drop)).StoreArray((*[16]uint8)(dq))
+			dq = unsafe.Add(dq, cnt(drop))
+			notPlain = drop >> 31 // the last byte was dropped: special (or a stuffed dot)
+			drop >>= 16
+			out.GetHi().PermuteOrZero(idx(drop)).StoreArray((*[16]uint8)(dq))
+			dq = unsafe.Add(dq, cnt(drop))
 		}
-		keep := ^ctl.Or(line.And(isDot)).ToBits()
-		// escaped bytes lose 42+64, the others 42
-		out := v.Sub(k42).Sub(k64.Masked(esc))
-		lo, hi := out.GetLo(), out.GetHi()
-		m0, m1, m2, m3 := keep&0xff, keep>>8&0xff, keep>>16&0xff, keep>>24
-		lo.PermuteOrZero(shuf(0, m0)).StoreArray((*[16]uint8)(dq))
-		dq = unsafe.Add(dq, count(m0))
-		lo.PermuteOrZero(shuf(unsafe.Offsetof(lut.hi), m1)).StoreArray((*[16]uint8)(dq))
-		dq = unsafe.Add(dq, count(m1))
-		hi.PermuteOrZero(shuf(0, m2)).StoreArray((*[16]uint8)(dq))
-		dq = unsafe.Add(dq, count(m2))
-		hi.PermuteOrZero(shuf(unsafe.Offsetof(lut.hi), m3)).StoreArray((*[16]uint8)(dq))
-		dq = unsafe.Add(dq, count(m3))
-		sq = unsafe.Add(sq, 32)
+		sq = unsafe.Add(sq, 64)
 	}
 	return int(uintptr(dq) - uintptr(unsafe.Pointer(unsafe.SliceData(dst)))),
 		int(uintptr(sq) - uintptr(unsafe.Pointer(unsafe.SliceData(src))))
@@ -370,11 +431,15 @@ func tailVBMI2(dst, src []byte, p, i int) (int, int) {
 }
 
 // steps16 is steps32 with 16-byte vectors (AVX): from src[i] while at least
-// 24 bytes are left and no block needs the state machine. The caller
-// guarantees the state machine invariant at i (see decodeSIMD).
+// 24 bytes are left and no block needs the state machine. It also decodes
+// the tail of src after steps32, so a step is one vector, and the fast path
+// takes two while 48 bytes are left. The caller guarantees the state machine
+// invariant at i (see decodeSIMD), but src[i-1] may be a '=' or "\r\n"
+// (where steps32 stopped): notPlain starts from it.
 //
-// Bounds (unchecked; i+24 <= len(src) <= len(dst), p <= i, i >= 2): the
-// loads are src[i-2:i+17), the stores reach dst[p+24).
+// Bounds (unchecked; i+24 <= len(src) <= len(dst), p <= i, i >= 2): a step
+// loads src[i-2:i+17) and stores dst[p:p+16); the fast path loads
+// src[i:i+32) and stores dst[p:p+32), with i+48 <= len(src).
 func steps16(dst, src []byte, p, i int) (int, int) {
 	if len(src) < 24 {
 		return p, i
@@ -383,36 +448,83 @@ func steps16(dst, src []byte, p, i int) (int, int) {
 	cr := archsimd.BroadcastUint8x16('\r')
 	lf := archsimd.BroadcastUint8x16('\n')
 	dot := archsimd.BroadcastUint8x16('.')
-	ky := archsimd.BroadcastUint8x16('y')
 	k42 := archsimd.BroadcastUint8x16(42)
 	k64 := archsimd.BroadcastUint8x16(64)
+	yCR := archsimd.LoadUint8x16Array((*[16]uint8)(unsafe.Pointer(&nibYCR)))
+	crlf := archsimd.LoadUint8x16Array((*[16]uint8)(unsafe.Pointer(&nibCRLF)))
 	load := func(q unsafe.Pointer, off int) archsimd.Uint8x16 {
 		return archsimd.LoadUint8x16Array((*[16]uint8)(unsafe.Add(q, off)))
 	}
+	idx8 := (*[1 << 16][8]int8)(unsafe.Pointer(&pack.idx)) // pack.idx in 8-byte halves: an index the CPU can scale
+	idx := func(m uint32) archsimd.Int8x16 {               // pack.idx[m&0x7fff]
+		return archsimd.LoadInt8x16Array((*[16]int8)(unsafe.Pointer(&idx8[(m&0x7fff)<<1])))
+	}
+	cnt := func(m uint32) int { return int(pack.cnt[m&0xffff]) }
 	sq := unsafe.Add(unsafe.Pointer(unsafe.SliceData(src)), i) // &src[i]
 	dq := unsafe.Add(unsafe.Pointer(unsafe.SliceData(dst)), p) // &dst[p]
 	last := unsafe.Add(unsafe.Pointer(unsafe.SliceData(src)), len(src)-24)
+	pair := unsafe.Add(unsafe.Pointer(unsafe.SliceData(src)), len(src)-48) // where a second vector still fits
+	// the context at src[i]: steps32 may have stopped after a '=' or "\r\n"
+	notPlain := uint32(0)
+	if c := src[i-1]; c == '=' || c == '\n' && src[i-2] == '\r' {
+		notPlain = 1
+	}
 	for uintptr(sq) <= uintptr(last) {
-		v := load(sq, 0)
-		b1 := load(sq, -1)
-		b2 := load(sq, -2)
-		a1 := load(sq, 1)
-		isEq, isDot := v.Equal(eq), v.Equal(dot)
-		ctl := isEq.Or(v.Equal(cr)).Or(v.Equal(lf))
-		esc := b1.Equal(eq)
-		line := b1.Equal(lf).And(b2.Equal(cr))
-		bad := esc.And(ctl).
-			Or(line.And(isEq).And(a1.Equal(ky))).
-			Or(line.And(isDot).And(a1.Equal(cr).Or(a1.Equal(eq))))
+		v0 := load(sq, 0)
+		ctl0 := v0.Equal(eq).Or(v0.Equal(crlf.PermuteOrZero(v0.AsInt8x16()))) // '=', '\r', '\n' are never output
+		two := uintptr(sq) <= uintptr(pair)                                   // a second vector fits
+		var v1 archsimd.Uint8x16
+		var ctl1 archsimd.Mask8x16
+		fast := false
+		if two {
+			v1 = load(sq, 16)
+			ctl1 = v1.Equal(eq).Or(v1.Equal(crlf.PermuteOrZero(v1.AsInt8x16())))
+			fast = uint32(ctl0.Or(ctl1).ToBits())|notPlain == 0
+		}
+		if fast {
+			v0.Sub(k42).StoreArray((*[16]uint8)(dq))
+			v1.Sub(k42).StoreArray((*[16]uint8)(unsafe.Add(dq, 16)))
+			dq = unsafe.Add(dq, 32)
+			sq = unsafe.Add(sq, 32)
+			continue
+		}
+		// the first vector
+		b1 := load(sq, -1)  // the byte before each byte
+		b2 := load(sq, -2)  // and the one before that
+		a1 := load(sq, 1)   // the byte after
+		esc := b1.Equal(eq) // escaped by the byte before
+		// right after "\r\n", a '=' or '.'
+		ld := b1.Equal(lf).And(b2.Equal(cr)).And(v0.Equal(eq).Or(v0.Equal(dot)))
+		// the bad bytes, as in steps32
+		bad := esc.And(ctl0).Or(ld.And(a1.Equal(yCR.PermuteOrZero(a1.AsInt8x16())).Or(a1.Equal(eq))))
 		if !bad.ToInt8x16().IsZero() {
 			break
 		}
-		keep := ^uint32(ctl.Or(line.And(isDot)).ToBits()) & 0xffff
-		out := v.Sub(k42).Sub(k64.Masked(esc))
-		out.PermuteOrZero(shuffle(0, keep&0xff)).StoreArray((*[16]uint8)(dq))
-		dq = unsafe.Add(dq, int(lut.count[keep&0xff]))
-		out.PermuteOrZero(shuffle(1, keep>>8)).StoreArray((*[16]uint8)(dq))
-		dq = unsafe.Add(dq, int(lut.count[keep>>8]))
+		drop := uint32(ctl0.Or(ld).ToBits()) // not output: ctl and the stuffed dot
+		// escaped bytes lose 42+64, the others 42
+		out := v0.Sub(k42).Sub(k64.Masked(esc))
+		out.PermuteOrZero(idx(drop)).StoreArray((*[16]uint8)(dq))
+		dq = unsafe.Add(dq, cnt(drop))
+		notPlain = drop >> 15 // the last byte was dropped: special (or a stuffed dot)
+		sq = unsafe.Add(sq, 16)
+		if !two {
+			continue
+		}
+		// the second vector, the same
+		b1 = load(sq, -1)
+		b2 = load(sq, -2)
+		a1 = load(sq, 1)
+		esc = b1.Equal(eq)
+		ld = b1.Equal(lf).And(b2.Equal(cr)).And(v1.Equal(eq).Or(v1.Equal(dot)))
+		bad = esc.And(ctl1).Or(ld.And(a1.Equal(yCR.PermuteOrZero(a1.AsInt8x16())).Or(a1.Equal(eq))))
+		if !bad.ToInt8x16().IsZero() {
+			break
+		}
+		drop = uint32(ctl1.Or(ld).ToBits())
+		out = v1.Sub(k42).Sub(k64.Masked(esc))
+		out.PermuteOrZero(idx(drop)).StoreArray((*[16]uint8)(dq))
+		dq = unsafe.Add(dq, cnt(drop))
+		notPlain = drop >> 15
 		sq = unsafe.Add(sq, 16)
 	}
 	return int(uintptr(dq) - uintptr(unsafe.Pointer(unsafe.SliceData(dst)))),
