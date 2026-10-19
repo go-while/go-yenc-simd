@@ -37,7 +37,7 @@ func TestWord(t *testing.T) {
 						break
 					}
 				}
-				o, tt := word(binary.LittleEndian.Uint64(in[:]))
+				o, tt := word(binary.LittleEndian.Uint64(in[:]), ones, highs, eqs, crs, lfs, k42s)
 				binary.LittleEndian.PutUint64(out[:], o)
 				for k, b := range in {
 					if out[k] != b-42 {

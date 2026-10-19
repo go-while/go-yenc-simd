@@ -177,7 +177,7 @@ const (
 // with the high bit of every byte set, so subtracting 42 from its bytes never
 // borrows from the next byte: xh-k42s is x-42 in every byte, but with the
 // high bit set, which hx puts right.
-func word(x uint64) (out, t uint64) {
+func word(x, ones, highs, eqs, crs, lfs, k42s uint64) (out, t uint64) {
 	xh := x | highs
 	hx := xh ^ x
 	t = (x ^ eqs - ones) | (x ^ crs - ones) | (x ^ lfs - ones)
@@ -202,11 +202,13 @@ func word(x uint64) (out, t uint64) {
 // loop, p+8 <= i+8 <= n in the 8-byte step and p <= i < n for the bytes.
 func decodePlain(dst, src []byte, p, i int) (int, int) {
 	n := len(src)
+	ones, highs := swarWords() // the constants as values, see swarWords
+	eqs, crs, lfs, k42s := ones*'=', ones*'\r', ones*'\n', ones*42
 	dp := unsafe.Pointer(unsafe.SliceData(dst)) // unchecked: see above
 	for i < n-15 {
 		// the first word, and the second only if the first has no special
 		// byte, so a short run costs one word
-		out0, t0 := word(binary.LittleEndian.Uint64(src[i:]))
+		out0, t0 := word(binary.LittleEndian.Uint64(src[i:]), ones, highs, eqs, crs, lfs, k42s)
 		binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(dp, p))[:], out0)
 		// the first special byte, if any: an escape or a line break (or
 		// something rarer) at src[i+k]
@@ -214,7 +216,7 @@ func decodePlain(dst, src []byte, p, i int) (int, int) {
 		if t0 != 0 {
 			k = bits.TrailingZeros64(t0) >> 3
 		} else {
-			out1, t1 := word(binary.LittleEndian.Uint64(src[i+8:]))
+			out1, t1 := word(binary.LittleEndian.Uint64(src[i+8:]), ones, highs, eqs, crs, lfs, k42s)
 			binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(dp, p+8))[:], out1)
 			if t1 == 0 {
 				i += 16
@@ -242,7 +244,7 @@ func decodePlain(dst, src []byte, p, i int) (int, int) {
 	}
 	// 8 more bytes, up to the first special byte
 	if i < n-7 {
-		out, t := word(binary.LittleEndian.Uint64(src[i:]))
+		out, t := word(binary.LittleEndian.Uint64(src[i:]), ones, highs, eqs, crs, lfs, k42s)
 		binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(dp, p))[:], out)
 		k := bits.TrailingZeros64(t) >> 3 // 8 if none
 		i += k
