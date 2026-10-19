@@ -3,6 +3,7 @@
 package yencsimd
 
 import (
+	"errors"
 	"math/bits"
 	"simd/archsimd"
 	"sync"
@@ -26,6 +27,51 @@ func Kernel() string {
 		return "avx"
 	}
 	return "scalar"
+}
+
+// cpu* remember what the CPU can do; SetKernel changes what is used.
+var cpuVBMI2, cpuAVX2, cpuAVX = hasVBMI2, hasAVX2, hasAVX
+
+// Kernels lists the decode paths this CPU can run, fastest first.
+func Kernels() []string {
+	var k []string
+	if cpuVBMI2 {
+		k = append(k, "avx512vbmi2")
+	}
+	if cpuAVX2 {
+		k = append(k, "avx2")
+	}
+	if cpuAVX {
+		k = append(k, "avx")
+	}
+	return append(k, "scalar")
+}
+
+// SetKernel limits the decoder to the named path, one of Kernels(). It is
+// meant for benchmarks and tests: it changes package state, so call it only
+// while nothing is decoding.
+func SetKernel(name string) error {
+	switch name {
+	case "avx512vbmi2":
+		if cpuVBMI2 {
+			hasVBMI2, hasAVX2, hasAVX = true, cpuAVX2, cpuAVX
+			return nil
+		}
+	case "avx2":
+		if cpuAVX2 {
+			hasVBMI2, hasAVX2, hasAVX = false, true, cpuAVX
+			return nil
+		}
+	case "avx":
+		if cpuAVX {
+			hasVBMI2, hasAVX2, hasAVX = false, false, true
+			return nil
+		}
+	case "scalar":
+		hasVBMI2, hasAVX2, hasAVX = false, false, false
+		return nil
+	}
+	return errors.New("yencsimd: kernel " + name + " is not available on this CPU")
 }
 
 func decode(dst, src []byte, state *State) (int, int, End) {

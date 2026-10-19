@@ -125,6 +125,47 @@ same core).
 `Decode` and `Reader` include the CRC32 (`hash/crc32`: 10 GB/s on the i7,
 33 GB/s on the EPYC), which is now a large share of their time.
 
+## Benchmarks
+
+The quickest way, no clone needed (Go 1.27):
+
+```sh
+GOEXPERIMENT=simd go run github.com/go-while/go-yenc-simd/cmd/yencbench@latest
+```
+
+It prints MB/s for every kernel your CPU can run (AVX-512 VBMI2, AVX2, AVX,
+scalar) on three 750 KB articles (random data, data that needs no escapes, an
+escape in every second byte), and for `Decode` of a whole article with the
+CRC check. Without `GOEXPERIMENT=simd` it measures the plain Go build. Flags:
+`-time 1s` per measurement, `-size 750000` data bytes per article, `-kernels
+avx2,scalar` to pick kernels. Pin it to one core for steady numbers
+(`taskset -c 2 ...` on Linux).
+
+From a program, for example behind a `-yencbench` flag:
+
+```go
+import "github.com/go-while/go-yenc-simd/yencbench"
+
+if *bench {
+	if err := yencbench.Run(os.Stdout, yencbench.Options{}); err != nil {
+		log.Fatal(err)
+	}
+	return
+}
+```
+
+`yencbench.Measure` returns the numbers instead of printing them; the kernel
+in use is restored afterwards. `yencsimd.Kernels()` lists the kernels and
+`yencsimd.SetKernel` picks one (only while nothing is decoding).
+
+The full set, including `Reader` with 4 KiB and 64 KiB buffers, is in the
+package's tests:
+
+```sh
+git clone https://github.com/go-while/go-yenc-simd && cd go-yenc-simd
+GOEXPERIMENT=simd go test -run '^$' -bench . -benchtime 1s
+```
+
 ## How it works, and tests
 
 - A 7-state machine that matches rapidyenc's scalar reference byte for byte.
@@ -137,7 +178,6 @@ same core).
 
 ```sh
 GOEXPERIMENT=simd go test ./...
-GOEXPERIMENT=simd go test -run '^$' -bench .
 ```
 
 ## Credits
