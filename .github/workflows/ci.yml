@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, testing, neon]
+    branches: [main, testing]
   pull_request:
   workflow_dispatch:
 
@@ -35,6 +35,12 @@ jobs:
         env:
           GOEXPERIMENT: simd
         run: go test -run xxx -fuzz FuzzVectorPathsMatchStateMachine -fuzztime 60s .
+      - name: Race detector and checkptr, GOEXPERIMENT=simd
+        # the NEON loops' unsafe pointer arithmetic is checked only here
+        if: runner.arch == 'ARM64'
+        env:
+          GOEXPERIMENT: simd
+        run: go test -race -count=1 .
       - name: CPU
         if: runner.arch == 'ARM64'
         shell: bash

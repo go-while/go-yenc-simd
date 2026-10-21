@@ -122,15 +122,24 @@ same core).
 | `Decode` (whole article, size and CRC checked) | 1.8 GB/s | 10.4 GB/s |
 | `Reader` on a 64 KiB `bufio.Reader` | 2.0 GB/s | 12.6 GB/s |
 | rapidyenc, random data | 3.8 GB/s | 17.3 GB/s (VBMI2), 18.8 GB/s (AVX2) |
-| arm64 NEON, random data (GitHub runners, see below) | Apple M1 (`macos-latest`): 6.0–6.6 GB/s, plain Go 1.9–2.4 GB/s | Neoverse N2 (`ubuntu-24.04-arm`): 5.4 GB/s, plain Go 2.6–2.7 GB/s |
 
 `Decode` and `Reader` include the CRC32 (`hash/crc32`: 10 GB/s on the i7,
 33 GB/s on the EPYC), which is now a large share of their time.
 
-The arm64 row is not from the machines above. It is `yencbench -time 500ms`
-on GitHub's runners, three CI runs. They are shared VMs, not pinned, so
-expect ±15%. One run of `macos-latest` got an Apple M2 Pro: 8.9 GB/s there,
-plain Go 2.9 GB/s.
+On arm64 (NEON) the numbers are from GitHub's runners: `yencbench -time
+500ms` in five CI runs. They are shared VMs, not pinned, so the Apple M1
+numbers vary a lot between runs:
+
+| | Apple M1 (`macos-latest`) | Neoverse N2 (`ubuntu-24.04-arm`) |
+|---|---|---|
+| `DecodeIncremental`, random data | 6.0–8.0 GB/s | 5.4 GB/s |
+| same, data that needs no escapes | 7.0–11.8 GB/s | 7.7 GB/s |
+| same, an escape in every second byte | 6.2–9.2 GB/s | 5.8 GB/s |
+| same, plain Go (no `GOEXPERIMENT=simd`) | 1.9–2.7 GB/s | 2.6–2.7 GB/s |
+| `Decode` (whole article, size and CRC checked) | 2.1–3.2 GB/s | 3.4 GB/s |
+
+One run of `macos-latest` got an Apple M2 Pro instead: 8.9 GB/s on random
+data, plain Go 2.8 GB/s.
 
 ## Benchmarks
 
@@ -180,8 +189,13 @@ GOEXPERIMENT=simd go test -run '^$' -bench . -benchtime 1s
   breaks and stuffed dots are handled in the vector code too. Rare cases
   (`==`, escaped line breaks, the end markers) go through the state machine.
 - Tests: 504 golden outputs from rapidyenc's C decoder on every vector path,
-  each vector path against the state machine (random inputs and fuzzing),
-  encode/decode round trips, and `Reader` on whole and byte-by-byte input.
+  each vector path against the state machine (random inputs; every string of
+  up to 4 of `=`, `\r`, `\n`, `.`, `y` and a plain byte, at every offset from
+  0 to 140, so across every vector boundary; fuzzing), encode/decode round
+  trips, and `Reader` on whole and byte-by-byte input. On amd64 a test reads
+  the machine code and checks that each kernel uses only instructions its CPU
+  check guarantees (an AVX2 instruction in the AVX kernel would crash Sandy
+  Bridge).
 
 ```sh
 GOEXPERIMENT=simd go test ./...
