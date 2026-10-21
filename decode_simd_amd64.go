@@ -481,6 +481,20 @@ func tailVBMI2(dst, src []byte, p, i int) (int, int) {
 	return p + cnt, i
 }
 
+// splat16 are the constants of steps16, loaded with VMOVDQU (AVX):
+// archsimd.BroadcastUint8x16 is VPBROADCASTB, an AVX2 instruction, and
+// steps16 runs on CPUs with AVX but not AVX2 (TestKernelISA checks).
+var splat16 = struct{ eq, cr, lf, dot, k42, k64 [16]uint8 }{
+	fill16('='), fill16('\r'), fill16('\n'), fill16('.'), fill16(42), fill16(64),
+}
+
+func fill16(c byte) (t [16]uint8) {
+	for i := range t {
+		t[i] = c
+	}
+	return
+}
+
 // steps16 is steps32 with 16-byte vectors (AVX): from src[i] while at least
 // 24 bytes are left and no block needs the state machine. It also decodes
 // the tail of src after steps32, so a step is one vector, and the fast path
@@ -495,12 +509,12 @@ func steps16(dst, src []byte, p, i int) (int, int) {
 	if len(src) < 24 {
 		return p, i
 	}
-	eq := archsimd.BroadcastUint8x16('=')
-	cr := archsimd.BroadcastUint8x16('\r')
-	lf := archsimd.BroadcastUint8x16('\n')
-	dot := archsimd.BroadcastUint8x16('.')
-	k42 := archsimd.BroadcastUint8x16(42)
-	k64 := archsimd.BroadcastUint8x16(64)
+	eq := archsimd.LoadUint8x16Array(&splat16.eq)
+	cr := archsimd.LoadUint8x16Array(&splat16.cr)
+	lf := archsimd.LoadUint8x16Array(&splat16.lf)
+	dot := archsimd.LoadUint8x16Array(&splat16.dot)
+	k42 := archsimd.LoadUint8x16Array(&splat16.k42)
+	k64 := archsimd.LoadUint8x16Array(&splat16.k64)
 	yCR := archsimd.LoadUint8x16Array((*[16]uint8)(unsafe.Pointer(&nibYCR)))
 	crlf := archsimd.LoadUint8x16Array((*[16]uint8)(unsafe.Pointer(&nibCRLF)))
 	load := func(q unsafe.Pointer, off int) archsimd.Uint8x16 {
