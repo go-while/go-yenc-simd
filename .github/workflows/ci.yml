@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, testing]
+    branches: [main, testing, neon]
   pull_request:
   workflow_dispatch:
 
@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -24,16 +24,25 @@ jobs:
           go vet ./...
           go test ./...
       - name: Vet and test, GOEXPERIMENT=simd
-        if: runner.arch == 'X64'
+        if: runner.arch == 'X64' || runner.arch == 'ARM64'
         env:
           GOEXPERIMENT: simd
         run: |
           go vet ./...
           go test ./...
-      - name: Benchmark, plain Go
-        run: go run ./cmd/yencbench -time 300ms
-      - name: Benchmark, GOEXPERIMENT=simd
-        if: runner.arch == 'X64'
+      - name: Fuzz the vector paths, GOEXPERIMENT=simd
+        if: runner.arch == 'ARM64'
         env:
           GOEXPERIMENT: simd
-        run: go run ./cmd/yencbench -time 300ms
+        run: go test -run xxx -fuzz FuzzVectorPathsMatchStateMachine -fuzztime 60s .
+      - name: CPU
+        if: runner.arch == 'ARM64'
+        shell: bash
+        run: sysctl -n machdep.cpu.brand_string 2>/dev/null || lscpu
+      - name: Benchmark, plain Go
+        run: go run ./cmd/yencbench -time 500ms
+      - name: Benchmark, GOEXPERIMENT=simd
+        if: runner.arch == 'X64' || runner.arch == 'ARM64'
+        env:
+          GOEXPERIMENT: simd
+        run: go run ./cmd/yencbench -time 500ms

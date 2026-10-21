@@ -1,5 +1,5 @@
 // Package yencsimd decodes yEnc articles from Usenet (NNTP), in pure Go,
-// with SIMD on amd64 when built with GOEXPERIMENT=simd.
+// with SIMD on amd64 and arm64 when built with GOEXPERIMENT=simd.
 //
 // Most programs need one of two functions:
 //
@@ -20,9 +20,9 @@
 //
 // The byte-wise decoder is a small state machine that matches rapidyenc's
 // scalar reference (decoder.cc, do_decode_end_scalar<isRaw=true>) state for
-// state. With GOEXPERIMENT=simd on amd64, vector loops decode 16, 32 or 64
-// bytes per step (AVX, AVX2, AVX-512 VBMI2); elsewhere it is plain Go, 16
-// bytes per step (two 64-bit words, SWAR).
+// state. With GOEXPERIMENT=simd, vector loops decode 16, 32 or 64 bytes per
+// step: AVX, AVX2 or AVX-512 VBMI2 on amd64, NEON on arm64; elsewhere it is
+// plain Go, 16 bytes per step (two 64-bit words, SWAR).
 package yencsimd
 
 import (
