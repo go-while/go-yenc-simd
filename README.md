@@ -1,8 +1,8 @@
 # go-yenc-simd
 
 A fast yEnc decoder for Go, for articles from Usenet (NNTP). Pure Go, no cgo.
-With `GOEXPERIMENT=simd` on amd64 it uses AVX, AVX2 or AVX-512; everywhere else
-it is plain Go.
+With `GOEXPERIMENT=simd` it uses AVX, AVX2 or AVX-512 on amd64 and NEON on
+arm64; everywhere else it is plain Go.
 
 ```sh
 go get github.com/go-while/go-yenc-simd
@@ -81,6 +81,7 @@ GOEXPERIMENT=simd go build ./...
 | | |
 |---|---|
 | amd64 with `GOEXPERIMENT=simd` | AVX-512 VBMI2, AVX2 or AVX, chosen at run time |
+| arm64 with `GOEXPERIMENT=simd` | NEON, 64 bytes per step |
 | anything else | plain Go, 16 bytes per step (about 1–3.5 GB/s) |
 
 `GOEXPERIMENT=simd` needs Go 1.27 and is an experiment, outside the Go 1
@@ -121,9 +122,15 @@ same core).
 | `Decode` (whole article, size and CRC checked) | 1.8 GB/s | 10.4 GB/s |
 | `Reader` on a 64 KiB `bufio.Reader` | 2.0 GB/s | 12.6 GB/s |
 | rapidyenc, random data | 3.8 GB/s | 17.3 GB/s (VBMI2), 18.8 GB/s (AVX2) |
+| arm64 NEON, random data (GitHub runners, see below) | Apple M1 (`macos-latest`): 6.0–6.6 GB/s, plain Go 1.9–2.4 GB/s | Neoverse N2 (`ubuntu-24.04-arm`): 5.4 GB/s, plain Go 2.6–2.7 GB/s |
 
 `Decode` and `Reader` include the CRC32 (`hash/crc32`: 10 GB/s on the i7,
 33 GB/s on the EPYC), which is now a large share of their time.
+
+The arm64 row is not from the machines above. It is `yencbench -time 500ms`
+on GitHub's runners, three CI runs. They are shared VMs, not pinned, so
+expect ±15%. One run of `macos-latest` got an Apple M2 Pro: 8.9 GB/s there,
+plain Go 2.9 GB/s.
 
 ## Benchmarks
 
@@ -133,13 +140,13 @@ The quickest way, no clone needed (Go 1.27):
 GOEXPERIMENT=simd go run github.com/go-while/go-yenc-simd/cmd/yencbench@latest
 ```
 
-It prints MB/s for every kernel your CPU can run (AVX-512 VBMI2, AVX2, AVX,
-scalar) on three 750 KB articles (random data, data that needs no escapes, an
-escape in every second byte), and for `Decode` of a whole article with the
-CRC check. Without `GOEXPERIMENT=simd` it measures the plain Go build. Flags:
-`-time 1s` per measurement, `-size 750000` data bytes per article, `-kernels
-avx2,scalar` to pick kernels. Pin it to one core for steady numbers
-(`taskset -c 2 ...` on Linux).
+It prints MB/s for every kernel your CPU can run (AVX-512 VBMI2, AVX2, AVX or
+NEON, and scalar) on three 750 KB articles (random data, data that needs no
+escapes, an escape in every second byte), and for `Decode` of a whole article
+with the CRC check. Without `GOEXPERIMENT=simd` it measures the plain Go
+build. Flags: `-time 1s` per measurement, `-size 750000` data bytes per
+article, `-kernels avx2,scalar` to pick kernels. Pin it to one core for steady
+numbers (`taskset -c 2 ...` on Linux).
 
 From a program, for example behind a `-yencbench` flag:
 

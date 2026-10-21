@@ -1,4 +1,4 @@
-//go:build !(goexperiment.simd && amd64)
+//go:build !(goexperiment.simd && (amd64 || arm64))
 
 package yencsimd
 
@@ -13,7 +13,7 @@ func Kernels() []string { return []string{"scalar"} }
 // SetKernel limits the decoder to the named path, one of Kernels().
 func SetKernel(name string) error {
 	if name != "scalar" {
-		return errors.New("yencsimd: kernel " + name + " is not available (needs GOEXPERIMENT=simd on amd64)")
+		return errors.New("yencsimd: kernel " + name + " is not available (needs GOEXPERIMENT=simd on amd64 or arm64)")
 	}
 	return nil
 }
