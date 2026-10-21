@@ -7,7 +7,9 @@ import (
 )
 
 // The vector paths are checked against the state machine (decodeScalar), which
-// the golden table ties to rapidyenc's C decoder.
+// the golden table ties to rapidyenc's C decoder, and the scalar path, whose
+// word loop (decodePlain) skips the state machine for plain bytes, escapes
+// and line breaks, against the state machine alone (decodeSteps).
 
 // randomRaw makes input dense with the bytes that matter (=, \r, \n, ., y),
 // with plain runs in between, so every vector rule and block boundary is hit.
@@ -33,11 +35,32 @@ func randomRaw(r *rand.Rand, n int) []byte {
 	return b
 }
 
+// decodeSteps is the state machine alone, one byte at a time.
+func decodeSteps(dst, src []byte, state *State) (int, int, End) {
+	st, p := *state, 0
+	for i, c := range src {
+		var end End
+		st, p, end = step(st, c, dst, p)
+		if end != EndNone {
+			*state = st
+			return p, i + 1, end
+		}
+	}
+	*state = st
+	return p, len(src), EndNone
+}
+
+// compareWithScalar decodes src with the kernel and with decodeScalar (with
+// decodeSteps if the kernel is "scalar") and fails if they differ.
 func compareWithScalar(t testing.TB, kernel string, src []byte, st State) {
 	t.Helper()
+	ref := decodeScalar
+	if kernel == "scalar" {
+		ref = decodeSteps
+	}
 	sDst := make([]byte, len(src))
 	sSt := st
-	snd, sns, send := decodeScalar(sDst, src, &sSt)
+	snd, sns, send := ref(sDst, src, &sSt)
 	var vnd, vns int
 	var vend End
 	vDst := make([]byte, len(src))

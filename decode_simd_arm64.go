@@ -163,11 +163,6 @@ func neonOrder(m int) int {
 	return int(x)
 }
 
-// at16 is the 16 bytes at q+off. (The loops load through it, not through a
-// closure: an inlined function whose code all comes from its own body leaves
-// a NOP at the call, an inline mark for tracebacks.)
-func at16(q unsafe.Pointer, off int) *[16]uint8 { return (*[16]uint8)(unsafe.Add(q, off)) }
-
 // v8 is a compare result as bytes: 0xff where true, 0 where false.
 func v8(m archsimd.Mask8x16) archsimd.Uint8x16 { return m.ToInt8x16().ToBits() }
 

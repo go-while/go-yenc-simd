@@ -235,9 +235,6 @@ func steps32(dst, src []byte, p, i int) (int, int) {
 	k42 := archsimd.BroadcastUint8x32(42)
 	k64 := archsimd.BroadcastUint8x32(64)
 	yCR := archsimd.LoadUint8x32Array(&nibYCR)
-	load := func(q unsafe.Pointer, off int) archsimd.Uint8x32 {
-		return archsimd.LoadUint8x32Array((*[32]uint8)(unsafe.Add(q, off)))
-	}
 	idx8 := (*[1 << 16][8]int8)(unsafe.Pointer(&pack.idx)) // pack.idx in 8-byte halves: an index the CPU can scale
 	idx := func(m uint32) archsimd.Int8x16 {               // pack.idx[m&0x7fff]
 		return archsimd.LoadInt8x16Array((*[16]int8)(unsafe.Pointer(&idx8[(m&0x7fff)<<1])))
@@ -248,7 +245,8 @@ func steps32(dst, src []byte, p, i int) (int, int) {
 	last := unsafe.Add(unsafe.Pointer(unsafe.SliceData(src)), len(src)-72)
 	notPlain := uint32(0) // the caller guarantees a plain byte before src[i]
 	for uintptr(sq) <= uintptr(last) {
-		v0, v1 := load(sq, 0), load(sq, 32)
+		v0 := archsimd.LoadUint8x32Array(at32(sq, 0))
+		v1 := archsimd.LoadUint8x32Array(at32(sq, 32))
 		ctl0 := v0.Equal(eq).Or(v0.Equal(cr)).Or(v0.Equal(lf)) // '=', '\r', '\n' are never output
 		ctl1 := v1.Equal(eq).Or(v1.Equal(cr)).Or(v1.Equal(lf))
 		if ctl0.Or(ctl1).ToBits()|notPlain == 0 {
@@ -257,10 +255,10 @@ func steps32(dst, src []byte, p, i int) (int, int) {
 			dq = unsafe.Add(dq, 64)
 		} else {
 			// the first vector
-			b1 := load(sq, -1)  // the byte before each byte
-			b2 := load(sq, -2)  // and the one before that
-			a1 := load(sq, 1)   // the byte after
-			esc := b1.Equal(eq) // escaped by the byte before
+			b1 := archsimd.LoadUint8x32Array(at32(sq, -1)) // the byte before each byte
+			b2 := archsimd.LoadUint8x32Array(at32(sq, -2)) // and the one before that
+			a1 := archsimd.LoadUint8x32Array(at32(sq, 1))  // the byte after
+			esc := b1.Equal(eq)                            // escaped by the byte before
 			// right after "\r\n", a '=' or '.'
 			ld := b1.Equal(lf).And(b2.Equal(cr)).And(v0.Equal(eq).Or(v0.Equal(dot)))
 			// "==" (the second '=' would be escaped), an escaped \r or \n;
@@ -280,10 +278,10 @@ func steps32(dst, src []byte, p, i int) (int, int) {
 			out.GetHi().PermuteOrZero(idx(drop)).StoreArray((*[16]uint8)(dq))
 			dq = unsafe.Add(dq, cnt(drop))
 			// the second vector, the same (loaded again: a register less to keep)
-			v1 = load(sq, 32)
-			b1 = load(sq, 31)
-			b2 = load(sq, 30)
-			a1 = load(sq, 33)
+			v1 = archsimd.LoadUint8x32Array(at32(sq, 32))
+			b1 = archsimd.LoadUint8x32Array(at32(sq, 31))
+			b2 = archsimd.LoadUint8x32Array(at32(sq, 30))
+			a1 = archsimd.LoadUint8x32Array(at32(sq, 33))
 			esc = b1.Equal(eq)
 			ld = b1.Equal(lf).And(b2.Equal(cr)).And(v1.Equal(eq).Or(v1.Equal(dot)))
 			bad = esc.And(ctl1).Or(ld.And(a1.Equal(yCR.PermuteOrZeroGrouped(a1.AsInt8x32())).Or(a1.Equal(eq))))
@@ -517,9 +515,6 @@ func steps16(dst, src []byte, p, i int) (int, int) {
 	k64 := archsimd.LoadUint8x16Array(&splat16.k64)
 	yCR := archsimd.LoadUint8x16Array((*[16]uint8)(unsafe.Pointer(&nibYCR)))
 	crlf := archsimd.LoadUint8x16Array((*[16]uint8)(unsafe.Pointer(&nibCRLF)))
-	load := func(q unsafe.Pointer, off int) archsimd.Uint8x16 {
-		return archsimd.LoadUint8x16Array((*[16]uint8)(unsafe.Add(q, off)))
-	}
 	idx8 := (*[1 << 16][8]int8)(unsafe.Pointer(&pack.idx)) // pack.idx in 8-byte halves: an index the CPU can scale
 	idx := func(m uint32) archsimd.Int8x16 {               // pack.idx[m&0x7fff]
 		return archsimd.LoadInt8x16Array((*[16]int8)(unsafe.Pointer(&idx8[(m&0x7fff)<<1])))
@@ -538,14 +533,14 @@ func steps16(dst, src []byte, p, i int) (int, int) {
 		notPlain = 1
 	}
 	for uintptr(sq) <= uintptr(last) {
-		v0 := load(sq, 0)
+		v0 := archsimd.LoadUint8x16Array(at16(sq, 0))
 		ctl0 := v0.Equal(eq).Or(v0.Equal(crlf.PermuteOrZero(v0.AsInt8x16()))) // '=', '\r', '\n' are never output
 		two := uintptr(sq) <= uintptr(pair)                                   // a second vector fits
 		var v1 archsimd.Uint8x16
 		var ctl1 archsimd.Mask8x16
 		fast := false
 		if two {
-			v1 = load(sq, 16)
+			v1 = archsimd.LoadUint8x16Array(at16(sq, 16))
 			ctl1 = v1.Equal(eq).Or(v1.Equal(crlf.PermuteOrZero(v1.AsInt8x16())))
 			fast = uint32(ctl0.Or(ctl1).ToBits())|notPlain == 0
 		}
@@ -557,10 +552,10 @@ func steps16(dst, src []byte, p, i int) (int, int) {
 			continue
 		}
 		// the first vector
-		b1 := load(sq, -1)  // the byte before each byte
-		b2 := load(sq, -2)  // and the one before that
-		a1 := load(sq, 1)   // the byte after
-		esc := b1.Equal(eq) // escaped by the byte before
+		b1 := archsimd.LoadUint8x16Array(at16(sq, -1)) // the byte before each byte
+		b2 := archsimd.LoadUint8x16Array(at16(sq, -2)) // and the one before that
+		a1 := archsimd.LoadUint8x16Array(at16(sq, 1))  // the byte after
+		esc := b1.Equal(eq)                            // escaped by the byte before
 		// right after "\r\n", a '=' or '.'
 		ld := b1.Equal(lf).And(b2.Equal(cr)).And(v0.Equal(eq).Or(v0.Equal(dot)))
 		// the bad bytes, as in steps32
@@ -579,9 +574,9 @@ func steps16(dst, src []byte, p, i int) (int, int) {
 			continue
 		}
 		// the second vector, the same
-		b1 = load(sq, -1)
-		b2 = load(sq, -2)
-		a1 = load(sq, 1)
+		b1 = archsimd.LoadUint8x16Array(at16(sq, -1))
+		b2 = archsimd.LoadUint8x16Array(at16(sq, -2))
+		a1 = archsimd.LoadUint8x16Array(at16(sq, 1))
 		esc = b1.Equal(eq)
 		ld = b1.Equal(lf).And(b2.Equal(cr)).And(v1.Equal(eq).Or(v1.Equal(dot)))
 		bad = esc.And(ctl1).Or(ld.And(a1.Equal(yCR.PermuteOrZero(a1.AsInt8x16())).Or(a1.Equal(eq))))

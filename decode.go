@@ -22,13 +22,14 @@
 // scalar reference (decoder.cc, do_decode_end_scalar<isRaw=true>) state for
 // state. With GOEXPERIMENT=simd, vector loops decode 16, 32 or 64 bytes per
 // step: AVX, AVX2 or AVX-512 VBMI2 on amd64, NEON on arm64; elsewhere it is
-// plain Go, 16 bytes per step (two 64-bit words, SWAR).
+// plain Go, 16 bytes per step (two 64-bit words, SWAR), or one on CPUs that
+// are big-endian or slow at unaligned loads.
 package yencsimd
 
 import (
-	"encoding/binary"
 	"errors"
 	"math/bits"
+	"runtime"
 	"unsafe"
 )
 
@@ -196,59 +197,68 @@ func word(x, ones, highs, eqs, crs, lfs, k42s uint64) (out, t uint64) {
 //
 // The words with the bytes minus 42 are stored before the first special byte
 // is known, so dst gets up to 8 bytes past the plain run that are
-// overwritten later. The stores are unchecked (a checked store needs len(dst)
-// in a register, and with it the word loop spilled): the output never gets
-// ahead of the input, p <= i, so p+16 <= i+16 <= n <= len(dst) in the word
-// loop, p+8 <= i+8 <= n in the 8-byte step and p <= i < n for the bytes.
+// overwritten later. The loads and stores are unchecked (a checked store
+// needs len(dst) in a register, and with it the word loop spilled): the
+// output never gets ahead of the input, p <= i, so p+16 <= i+16 <= n <=
+// len(dst) in the word loop, p+8 <= i+8 <= n in the 8-byte step and p <= i <
+// n for the bytes. They are plain loads and stores of a uint64, not
+// binary.LittleEndian's: an inlined call whose code all comes from its own
+// body leaves a NOP at the call (an inline mark, for tracebacks), and those
+// were 4 of the 70 instructions per 16 bytes, plus a bounds check. That
+// needs a little-endian CPU that loads unaligned words (wordAccess); on the
+// others decodePlain goes one byte at a time.
 func decodePlain(dst, src []byte, p, i int) (int, int) {
 	n := len(src)
-	ones, highs := swarWords() // the constants as values, see swarWords
-	eqs, crs, lfs, k42s := ones*'=', ones*'\r', ones*'\n', ones*42
 	dp := unsafe.Pointer(unsafe.SliceData(dst)) // unchecked: see above
-	for i < n-15 {
-		// the first word, and the second only if the first has no special
-		// byte, so a short run costs one word
-		out0, t0 := word(binary.LittleEndian.Uint64(src[i:]), ones, highs, eqs, crs, lfs, k42s)
-		binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(dp, p))[:], out0)
-		// the first special byte, if any: an escape or a line break (or
-		// something rarer) at src[i+k]
-		var k int
-		if t0 != 0 {
-			k = bits.TrailingZeros64(t0) >> 3
-		} else {
-			out1, t1 := word(binary.LittleEndian.Uint64(src[i+8:]), ones, highs, eqs, crs, lfs, k42s)
-			binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(dp, p+8))[:], out1)
-			if t1 == 0 {
-				i += 16
-				p += 16
-				continue
+	if wordAccess {
+		ones, highs := swarWords() // the constants as values, see swarWords
+		eqs, crs, lfs, k42s := ones*'=', ones*'\r', ones*'\n', ones*42
+		sp := unsafe.Pointer(unsafe.SliceData(src))
+		for i < n-15 {
+			// the first word, and the second only if the first has no special
+			// byte, so a short run costs one word
+			out0, t0 := word(*(*uint64)(unsafe.Add(sp, i)), ones, highs, eqs, crs, lfs, k42s)
+			*(*uint64)(unsafe.Add(dp, p)) = out0
+			// the first special byte, if any: an escape or a line break (or
+			// something rarer) at src[i+k]
+			var k int
+			if t0 != 0 {
+				k = bits.TrailingZeros64(t0) >> 3
+			} else {
+				out1, t1 := word(*(*uint64)(unsafe.Add(sp, i+8)), ones, highs, eqs, crs, lfs, k42s)
+				*(*uint64)(unsafe.Add(dp, p+8)) = out1
+				if t1 == 0 {
+					i += 16
+					p += 16
+					continue
+				}
+				k = 8 + bits.TrailingZeros64(t1)>>3
 			}
-			k = 8 + bits.TrailingZeros64(t1)>>3
+			i += k
+			p += k
+			if i+2 >= n {
+				break
+			}
+			s := src[i : i+3] // one bounds check
+			c, d, f := s[0], s[1], s[2]
+			if c == '=' && d != '\r' {
+				*(*byte)(unsafe.Add(dp, p)) = d - 42 - 64
+				p++
+				i += 2
+			} else if c == '\r' && d == '\n' && f != '.' && f != '=' && f != '\r' && f != '\n' {
+				i += 2
+			} else {
+				return p, i
+			}
 		}
-		i += k
-		p += k
-		if i+2 >= n {
-			break
+		// 8 more bytes, up to the first special byte
+		if i < n-7 {
+			out, t := word(*(*uint64)(unsafe.Add(sp, i)), ones, highs, eqs, crs, lfs, k42s)
+			*(*uint64)(unsafe.Add(dp, p)) = out
+			k := bits.TrailingZeros64(t) >> 3 // 8 if none
+			i += k
+			p += k
 		}
-		s := src[i : i+3] // one bounds check
-		c, d, f := s[0], s[1], s[2]
-		if c == '=' && d != '\r' {
-			*(*byte)(unsafe.Add(dp, p)) = d - 42 - 64
-			p++
-			i += 2
-		} else if c == '\r' && d == '\n' && f != '.' && f != '=' && f != '\r' && f != '\n' {
-			i += 2
-		} else {
-			return p, i
-		}
-	}
-	// 8 more bytes, up to the first special byte
-	if i < n-7 {
-		out, t := word(binary.LittleEndian.Uint64(src[i:]), ones, highs, eqs, crs, lfs, k42s)
-		binary.LittleEndian.PutUint64((*[8]byte)(unsafe.Add(dp, p))[:], out)
-		k := bits.TrailingZeros64(t) >> 3 // 8 if none
-		i += k
-		p += k
 	}
 	// the last bytes, one at a time
 	for i < n {
@@ -262,3 +272,9 @@ func decodePlain(dst, src []byte, p, i int) (int, int) {
 	}
 	return p, i
 }
+
+// wordAccess is whether decodePlain loads and stores 8 bytes at a time: on
+// little-endian CPUs that load an unaligned word as fast as an aligned one.
+// Elsewhere (big-endian, or unaligned loads trap) it goes byte by byte.
+const wordAccess = runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64" ||
+	runtime.GOARCH == "386" || runtime.GOARCH == "ppc64le" || runtime.GOARCH == "wasm"

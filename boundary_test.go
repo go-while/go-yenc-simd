@@ -27,9 +27,6 @@ func TestBoundaries(t *testing.T) {
 		plain[i] = 'A' + byte(i%26)
 	}
 	for _, k := range kernels() {
-		if k == "scalar" {
-			continue
-		}
 		n := 0
 		for _, pat := range pats {
 			for off := 0; off <= 140; off++ {

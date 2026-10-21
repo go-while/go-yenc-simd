@@ -2,6 +2,16 @@
 
 package yencsimd
 
+import "unsafe"
+
+// at16 and at32 are the 16 and 32 bytes at q+off. The vector loops load
+// through them, with the archsimd load at the call, not through a closure
+// that loads: an inlined function whose code all comes from its own body
+// leaves a NOP at each call (an inline mark, for tracebacks), and the loops
+// would run those NOPs at every step.
+func at16(q unsafe.Pointer, off int) *[16]uint8 { return (*[16]uint8)(unsafe.Add(q, off)) }
+func at32(q unsafe.Pointer, off int) *[32]uint8 { return (*[32]uint8)(unsafe.Add(q, off)) }
+
 // stateAfter is the state after the vector loop decoded up to src[i]: it
 // follows from the last bytes, since the loop never decoded "==", an escaped
 // line break or an end sequence.

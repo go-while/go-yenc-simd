@@ -82,7 +82,7 @@ GOEXPERIMENT=simd go build ./...
 |---|---|
 | amd64 with `GOEXPERIMENT=simd` | AVX-512 VBMI2, AVX2 or AVX, chosen at run time |
 | arm64 with `GOEXPERIMENT=simd` | NEON, 64 bytes per step |
-| anything else | plain Go, 16 bytes per step (about 1–3.5 GB/s) |
+| anything else | plain Go, 16 bytes per step (about 1–3.5 GB/s); one byte per step on big-endian CPUs and those slow at unaligned loads (riscv64, mips, 32-bit arm) |
 
 `GOEXPERIMENT=simd` needs Go 1.27 and is an experiment, outside the Go 1
 compatibility promise. Without it the package builds and works the same,
