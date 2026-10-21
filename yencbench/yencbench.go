@@ -10,9 +10,7 @@ import (
 	"hash/crc32"
 	"io"
 	"math/rand/v2"
-	"os"
 	"runtime"
-	"strings"
 	"time"
 
 	yencsimd "github.com/go-while/go-yenc-simd"
@@ -207,20 +205,4 @@ func plainByte(r *rand.Rand) byte {
 		}
 		return c
 	}
-}
-
-// cpuName is the CPU model from /proc/cpuinfo, or "".
-func cpuName() string {
-	b, err := os.ReadFile("/proc/cpuinfo")
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		if strings.HasPrefix(line, "model name") {
-			if _, v, ok := strings.Cut(line, ":"); ok {
-				return strings.Join(strings.Fields(v), " ")
-			}
-		}
-	}
-	return ""
 }
