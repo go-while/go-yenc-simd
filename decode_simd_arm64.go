@@ -53,6 +53,11 @@ func decode(dst, src []byte, state *State) (int, int, End) {
 // that steps64 leaves to it. A vector with a bad byte ends the loops; the
 // state machine takes it from there, one byte at a time. The last bytes, too
 // few for a vector, go through decodePlain, the word loop of the scalar path.
+//
+// The design follows rapidyenc's NEON decoder (animetosho/rapidyenc) and its
+// archsimd port in mnightingale/rapidyenc, both on GitHub: 64 bytes as four
+// vectors, '\r' and '\n' found with one table lookup, and a 2^15-entry table
+// that packs the bytes to keep.
 func decodeNEON(dst, src []byte, state *State) (int, int, End) {
 	neonOnce.Do(fillNEON)
 	st := *state

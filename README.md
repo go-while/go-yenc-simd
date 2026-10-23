@@ -203,8 +203,14 @@ GOEXPERIMENT=simd go test ./...
 
 ## Credits
 
-The decoding rules follow [rapidyenc](https://github.com/animetosho/rapidyenc)
-by animetosho (public domain / CC0).
+- [rapidyenc](https://github.com/animetosho/rapidyenc) by animetosho (public
+  domain / CC0): the decoding rules, and the general design of its SIMD
+  decoders, which the kernels here follow.
+- [mnightingale/rapidyenc](https://github.com/mnightingale/rapidyenc) by
+  Michael Nightingale (MIT): its archsimd port of rapidyenc's NEON decoder
+  showed how to write NEON in Go, and its commit
+  [527fe10](https://github.com/mnightingale/rapidyenc/commit/527fe101576bc61507bf1e1ebc9930f17850ba78)
+  led to the AVX fix in v0.1.2.
 
 ## License
 
