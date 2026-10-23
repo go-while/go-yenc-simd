@@ -41,6 +41,20 @@ jobs:
         env:
           GOEXPERIMENT: simd
         run: go test -race -count=1 .
+      # Linux and macOS: rapidyenc's cgo build (the encoder check) and
+      # nntp-testkit are not set up for Windows.
+      - name: End-to-end tests (e2e module), plain Go
+        if: runner.os != 'Windows'
+        working-directory: e2e
+        run: |
+          go vet ./...
+          go test -count=1 ./...
+      - name: End-to-end tests (e2e module), GOEXPERIMENT=simd
+        if: runner.os != 'Windows' && (runner.arch == 'X64' || runner.arch == 'ARM64')
+        working-directory: e2e
+        env:
+          GOEXPERIMENT: simd
+        run: go test -count=1 ./...
       - name: Benchmark, plain Go
         run: go run ./cmd/yencbench -time 500ms
       - name: Benchmark, GOEXPERIMENT=simd

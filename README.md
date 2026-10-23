@@ -196,9 +196,19 @@ GOEXPERIMENT=simd go test -run '^$' -bench . -benchtime 1s
   the machine code and checks that each kernel uses only instructions its CPU
   check guarantees (an AVX2 instruction in the AVX kernel would crash Sandy
   Bridge).
+- End to end, in the module `e2e` (so the library keeps no dependencies):
+  posts from [nntp-testkit](https://github.com/go-while/nntp-testkit)'s fake
+  NNTP server, fetched over TCP with `BODY` and decoded by `Reader` as shown
+  above, for every kernel. They cover four kinds of data, both ways encoders
+  treat `.`, tab and space at line edges, lines of 64 to 997 characters,
+  0 bytes to 750 KB, multi-part posts, broken posts (each gives its error and
+  the connection stays usable), posts cut off mid-body or sent a byte or a
+  line at a time, and 8 connections at once. rapidyenc's decoder checks the
+  encoder.
 
 ```sh
 GOEXPERIMENT=simd go test ./...
+cd e2e && GOEXPERIMENT=simd go test ./...
 ```
 
 ## Credits
