@@ -46,7 +46,15 @@ meta := d.Meta()                // Name, Size, Part, Total, Begin, End, CRC32
 ```
 
 `NewReader` reads through the closing `.` line, so the connection is ready
-for the next command.
+for the next command, also after a yEnc error such as `ErrCRC`. The one
+exception is an error from the connection itself (a timeout, a reset): then
+the article was not read to its end, so close the connection rather than
+reuse it. That error may come joined with a yEnc error, so check for it
+first (for example `var ne net.Error; errors.As(err, &ne)`), before
+`errors.Is(err, yencsimd.ErrCRC)` and the like.
+
+`io.Copy` writes the data before the size and the CRC at the end are checked:
+when it returns an error, throw away what it wrote.
 
 Each step decodes what the `bufio.Reader` has buffered (never reading past
 the article), straight into the caller's buffer when that can take it or
@@ -69,7 +77,11 @@ if err != nil {
 	return err // data may be incomplete or not match Begin..End
 }
 // meta.Part of meta.Total, bytes meta.Begin..meta.End (1-based, inclusive)
-// of a file of meta.Size bytes
+// of a file of meta.Size bytes; size= comes from the post, so bound it by
+// what you trust (the size you expect, or a maximum of your own)
+if meta.End > maxFileSize {
+	return errors.New("part beyond the expected file size")
+}
 f.WriteAt(data, meta.Begin-1)
 ```
 
@@ -79,7 +91,8 @@ inflated `size=`. Parts that disagree on `meta.Size` show a broken post, but
 agreeing parts prove nothing. Only a limit you trust bounds the write: write a
 part only when `err == nil` (then `len(data)` is `End-Begin+1`), and before
 `WriteAt` check `meta.End` against the file size you expect or a maximum of
-your own, and refuse the part if it is beyond it.
+your own, as above, and refuse the part if it is beyond it. With `Reader`,
+the same holds for `d.Meta()` once `Read` has returned `io.EOF`.
 
 For a part, the CRC checked is the `pcrc32=` of that part.
 
@@ -215,8 +228,9 @@ GOEXPERIMENT=simd go test -run '^$' -bench . -benchtime 1s
   0 bytes to 750 KB, multi-part posts, broken posts (each gives its error and
   the connection stays usable), posts cut off mid-body or sent a byte or a
   line at a time, and 8 connections at once. nntp-testkit's corpus of odd and
-  broken posts is fetched too, each checked against the outcome a decoder
-  should give. rapidyenc's decoder checks the encoder.
+  broken posts is fetched too, each checked against the outcome the corpus
+  gives for it: decoded with the right data, refused with one of the
+  decoder's errors (the corpus does not say which), or either. rapidyenc's decoder checks the encoder.
 
 ```sh
 GOEXPERIMENT=simd go test ./...

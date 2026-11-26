@@ -151,11 +151,12 @@ func TestDrainReadError(t *testing.T) {
 	mp := multiPart(file, 2, 3, 1001, 2000)
 	for _, c := range []struct {
 		name, input string
-		want        error // besides errRead; nil: only errRead
+		want        error  // besides errRead; nil: only errRead
+		text        string // and a plain error with this text
 	}{
 		{name: "after a good =yend", input: noDot},
 		{name: "after a bad crc32=", input: strings.Replace(noDot, fmt.Sprintf("crc32=%08x", crc32.ChecksumIEEE(data)), "crc32=00000000", 1), want: ErrCRC},
-		{name: "after =yending", input: strings.Replace(noDot, "=yend size=", "=yending size=", 1)},
+		{name: "after =yending", input: strings.Replace(noDot, "=yend size=", "=yending size=", 1), text: "unexpected line =yending"},
 		{name: "in the data after a bad size=", input: strings.Replace(good, "=ybegin line=128 size=5000 ", "=ybegin line=128 size=x ", 1)[:len(good)/2], want: ErrHeader},
 		{name: "in the data after a bad =ypart", input: strings.Replace(mp, "=ypart begin=1001 end=2000", "=ypart begin=0 end=999", 1)[:len(mp)/2], want: ErrHeader},
 	} {
@@ -168,8 +169,9 @@ func TestDrainReadError(t *testing.T) {
 				{"bytewise", iotest.OneByteReader(io.MultiReader(strings.NewReader(c.input), iotest.ErrReader(errRead)))},
 			} {
 				_, err := io.ReadAll(NewReader(r.r))
-				if !errors.Is(err, errRead) || c.want != nil && !errors.Is(err, c.want) {
-					t.Fatalf("%s: err = %v, want %v and %v", r.how, err, errRead, c.want)
+				if !errors.Is(err, errRead) || c.want != nil && !errors.Is(err, c.want) ||
+					err != nil && !strings.Contains(err.Error(), c.text) {
+					t.Fatalf("%s: err = %v, want %v and %v %q", r.how, err, errRead, c.want, c.text)
 				}
 			}
 		})

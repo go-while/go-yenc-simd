@@ -20,9 +20,10 @@ var (
 	ErrSize = errors.New("yencsimd: size mismatch")
 	// ErrCRC: the CRC32 of the decoded data differs from the =yend line.
 	ErrCRC = errors.New("yencsimd: crc32 mismatch")
-	// ErrHeader: a =ybegin, =ypart or =yend line has a missing or invalid
-	// value (size, part, begin, end, crc32 or pcrc32), or a multi-part post
-	// has no =ypart line.
+	// ErrHeader: =ybegin has no size=, a =ybegin, =ypart or =yend line has
+	// an invalid value (size, part, begin, end, or the crc32/pcrc32 that is
+	// checked), or another line comes where a multi-part post needs =ypart.
+	// part=, crc32=, pcrc32= and =yend size= may be left out.
 	ErrHeader = errors.New("yencsimd: bad =y line")
 )
 
