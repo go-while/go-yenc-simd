@@ -203,8 +203,9 @@ GOEXPERIMENT=simd go test -run '^$' -bench . -benchtime 1s
   treat `.`, tab and space at line edges, lines of 64 to 997 characters,
   0 bytes to 750 KB, multi-part posts, broken posts (each gives its error and
   the connection stays usable), posts cut off mid-body or sent a byte or a
-  line at a time, and 8 connections at once. rapidyenc's decoder checks the
-  encoder.
+  line at a time, and 8 connections at once. nntp-testkit's corpus of odd and
+  broken posts is fetched too, each checked against the outcome a decoder
+  should give. rapidyenc's decoder checks the encoder.
 
 ```sh
 GOEXPERIMENT=simd go test ./...
