@@ -180,8 +180,8 @@ var isaSets = []struct {
 	calls  [][2]any
 }{
 	{"every CPU", "", 0,
-		// listed so that they are in the test binary (no test calls
-		// Kernels or SetKernel) and the check sees them
+		// the exported entry points, listed so that the check covers them
+		// whether or not a test calls them
 		[]any{Kernel, Kernels, SetKernel, DecodeIncremental, Decode, NewReader},
 		[][2]any{{decode, decodeVBMI2}, {decode, decodeSIMD}}}, // behind hasVBMI2, hasAVX
 	// hasVBMI2 is AVX512 (F+CD+BW+DQ+VL, which includes AVX and AVX2) and

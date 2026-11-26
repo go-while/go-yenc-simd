@@ -30,17 +30,21 @@ jobs:
         run: |
           go vet ./...
           go test ./...
+      # Fuzzing and -race (which turns on checkptr, the check of the vector
+      # loops' unsafe pointer arithmetic) on arm64 (NEON) and x86 Linux (every
+      # kernel the runner's CPU has: GitHub's x86 runners vary, some with
+      # AVX-512 VBMI2, some with AVX2 only, so the AVX-512 kernel is also run
+      # on our own test hosts); not on Windows, where -race needs cgo and gcc.
       - name: Fuzz the vector paths, GOEXPERIMENT=simd
-        if: runner.arch == 'ARM64'
+        if: runner.arch == 'ARM64' || (runner.arch == 'X64' && runner.os == 'Linux')
         env:
           GOEXPERIMENT: simd
         run: go test -run xxx -fuzz FuzzVectorPathsMatchStateMachine -fuzztime 60s .
       - name: Race detector and checkptr, GOEXPERIMENT=simd
-        # the NEON loops' unsafe pointer arithmetic is checked only here
-        if: runner.arch == 'ARM64'
+        if: runner.arch == 'ARM64' || (runner.arch == 'X64' && runner.os == 'Linux')
         env:
           GOEXPERIMENT: simd
-        run: go test -race -count=1 .
+        run: go test -race -count=1 ./...
       # Linux and macOS: rapidyenc's cgo build (the encoder check) and
       # nntp-testkit are not set up for Windows.
       - name: End-to-end tests (e2e module), plain Go
@@ -55,6 +59,13 @@ jobs:
         env:
           GOEXPERIMENT: simd
         run: go test -count=1 ./...
+      - name: End-to-end tests (e2e module), -race, GOEXPERIMENT=simd
+        # Reader over real TCP connections, 8 at once, for every kernel
+        if: runner.os != 'Windows' && (runner.arch == 'X64' || runner.arch == 'ARM64')
+        working-directory: e2e
+        env:
+          GOEXPERIMENT: simd
+        run: go test -race -count=1 ./...
       - name: Benchmark, plain Go
         run: go run ./cmd/yencbench -time 500ms
       - name: Benchmark, GOEXPERIMENT=simd
