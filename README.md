@@ -62,6 +62,11 @@ line: `Read` then gives what it gives for an input that ends there, such as
 `ErrTruncated`, `io.EOF` after a whole `=yend` line, or the yEnc error that
 applies, and the next command fails on the closed connection.)
 
+Set a read deadline on the connection (`conn.SetReadDeadline`) before each
+`BODY`: `Reader` reads until the closing `.` line, so a broken or hostile
+server that never sends it would make `Read` wait forever. The timeout comes
+back as a read error, with `AtEnd` false.
+
 `io.Copy` writes the data before the size and the CRC at the end are checked:
 when it returns an error, throw away what it wrote.
 
