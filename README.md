@@ -57,9 +57,10 @@ if err != nil && !d.AtEnd() {
 }
 ```
 
-(`AtEnd` is also true when the server closed the connection mid-article:
-`Read` gives `ErrTruncated`, and the next command fails on the closed
-connection.)
+(`AtEnd` is also true when the server closed the connection before the `.`
+line: `Read` then gives what it gives for an input that ends there, such as
+`ErrTruncated`, `io.EOF` after a whole `=yend` line, or the yEnc error that
+applies, and the next command fails on the closed connection.)
 
 `io.Copy` writes the data before the size and the CRC at the end are checked:
 when it returns an error, throw away what it wrote.
@@ -120,15 +121,27 @@ give wrong data, a wrong place in the file, or no CRC check:
 - `size=` only after `name=`: `name=` comes last and runs to the end of the
   line, so keys after it are part of the name;
 - another line where a multi-part post needs its `=ypart` line (a `.` line
-  or the end of the input there gives `ErrTruncated`).
+  or the end of the input there gives `ErrTruncated`);
+- a `=ybegin`, `=ypart` or `=yend` line longer than about 64 KiB (real ones
+  are well under 1 KiB), so a broken or hostile article can't make `Reader`
+  hold a line of any length.
+
+These lines must end in a line end (LF or CR LF): one cut off by the end of
+the input gives `ErrTruncated`, also `=yend` (cut before `crc32=`, it would
+otherwise decode without a CRC check). A line counts as `=ybegin` from
+`=ybegin ` on; an input that ends before that space gives `ErrNoYbegin`. An
+input that ends after a whole `=yend` line, without the `.` line, still
+decodes. Only one line end is removed when looking for the `.` line, so `.`
+followed by CR CR LF is not the end of the article; in the `=y` lines extra
+CRs before the LF are ignored (they still count toward the 64 KiB).
 
 Up to v0.1.2 some of these decoded: `begin=0`, an `end=` beyond `size=`, a
 bad CRC value (the CRC was then not checked), `size=` after `name=`, and a
 `part=` that is 0, negative or not a number on a post without `=ypart` (it
-was taken as single-part). Two
-more forms decoded then and now give a plain error, as other `=y` lines in
-the data do: `part=` after `name=` (the post is single-part, so its `=ypart`
-line lands in the data), and a line such as `=yending` in place of `=yend`.
+was taken as single-part). Two more forms decoded then and now give a plain
+error, as other `=y` lines in the data do: `part=` after `name=` (the post
+is single-part, so its `=ypart` line lands in the data), and a line such as
+`=yending` in place of `=yend`.
 
 Odd forms that harm nothing still decode: upper-case hex, a CRC without
 leading zeros or with `0x`, `part=` without `total=`, an invalid `total=`

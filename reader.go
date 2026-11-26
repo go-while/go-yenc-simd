@@ -15,7 +15,8 @@ var (
 	// ErrNoYbegin: the article ended before a "=ybegin" line.
 	ErrNoYbegin = errors.New("yencsimd: no =ybegin line")
 	// ErrTruncated: the article ended after "=ybegin" but before "=yend"
-	// (also where a multi-part post needs its "=ypart" line).
+	// (also where a multi-part post needs its "=ypart" line), or inside a
+	// =ybegin, =ypart or =yend line: one without its line end.
 	ErrTruncated = errors.New("yencsimd: article ends before =yend")
 	// ErrSize: the decoded size differs from the =ybegin/=ypart/=yend sizes.
 	ErrSize = errors.New("yencsimd: size mismatch")
@@ -24,7 +25,8 @@ var (
 	// ErrHeader: =ybegin has no size=, =ypart has no begin= or end=, a
 	// =ybegin, =ypart or =yend line has an invalid value (size, part, begin,
 	// end, or the crc32/pcrc32 that is checked), or another line comes where
-	// a multi-part post needs =ypart. part=, crc32=, pcrc32= and =yend size=
+	// a multi-part post needs =ypart, or one of these lines is longer than
+	// about 64 KiB (maxControlLine). part=, crc32=, pcrc32= and =yend size=
 	// may be left out; an invalid total= is ignored.
 	ErrHeader = errors.New("yencsimd: bad =y line")
 )
@@ -74,9 +76,17 @@ type Reader struct {
 	crc       uint32 // CRC32 of the decoded bytes so far
 	n         int64  // decoded bytes so far
 
-	out []byte // decoded into dst, not yet returned
-	dst []byte // output buffer for Read calls with a small p
+	out  []byte // decoded into dst, not yet returned
+	dst  []byte // output buffer for Read calls with a small p
+	long []byte // a =y line longer than the bufio.Reader's buffer
 }
+
+// maxControlLine is the longest =ybegin, =ypart or =yend line taken, without
+// its line end (=yend without its "=y", so 2 bytes more there; extra CRs
+// before the LF count). Real ones are well under 1 KiB; a longer line gives
+// ErrHeader, and Reader keeps at most maxControlLine+3 bytes of it, so a
+// broken or hostile article can't make Reader hold a line of any length.
+const maxControlLine = 64 << 10
 
 // readerBufSize is the buffer NewReader puts on a plain io.Reader.
 const readerBufSize = 64 << 10
@@ -188,28 +198,38 @@ func (d *Reader) step(p []byte) (int, error) {
 // readHeader skips lines up to "=ybegin", parses it and an "=ypart" line.
 func (d *Reader) readHeader() error {
 	for {
-		line, err := d.readLine()
+		line, lf, long, err := d.readLine(true)
 		if err != nil {
 			return d.eof(err)
 		}
-		if bytes.Equal(line, []byte(".")) {
-			d.atEnd = true
-			return ErrNoYbegin
-		}
 		if !bytes.HasPrefix(line, []byte("=ybegin ")) {
+			if bytes.Equal(line, []byte(".")) {
+				d.atEnd = true
+				return ErrNoYbegin
+			}
 			continue
+		}
+		if !lf { // the input ends inside the =ybegin line
+			d.atEnd = true
+			return ErrTruncated
+		}
+		if long {
+			return d.drain(errLong("=ybegin"))
 		}
 		if err := d.meta.parseBegin(line); err != nil {
 			return d.drain(err)
 		}
 		if d.meta.Part > 0 {
-			part, err := d.readLine()
+			part, lf, long, err := d.readLine(false)
 			if err != nil && err != io.EOF {
 				return err
 			}
-			if err == io.EOF || bytes.Equal(part, []byte(".")) {
+			if err == io.EOF || !lf || bytes.Equal(part, []byte(".")) {
 				d.atEnd = true
 				return ErrTruncated // =ybegin seen: the article was cut short
+			}
+			if long {
+				return d.drain(errLong("=ypart"))
 			}
 			if err := d.meta.parsePart(part); err != nil {
 				return d.drain(err)
@@ -226,11 +246,20 @@ func (d *Reader) finish() error {
 	if d.truncated {
 		return ErrTruncated
 	}
-	rest, err := d.readLine() // after "=y": "end size=... pcrc32=..."
+	rest, lf, long, err := d.readLine(false) // after "=y": "end size=... pcrc32=..."
 	if err != nil {
 		return d.eof(err)
 	}
-	endSize, err := d.meta.parseEnd(rest) // also refuses another =y line in the data
+	if !lf { // the input ends inside the =yend line
+		d.atEnd = true
+		return ErrTruncated
+	}
+	var endSize int64
+	if long {
+		err = errLong("=yend")
+	} else {
+		endSize, err = d.meta.parseEnd(rest) // also refuses another =y line in the data
+	}
 	if err == nil {
 		err = d.meta.check(d.n, d.crc, endSize)
 	}
@@ -288,44 +317,77 @@ func (d *Reader) skipLine() (dot bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	return bytes.Equal(bytes.TrimRight(line, "\r\n"), []byte(".")), nil
+	return bytes.Equal(trimEOL(line), []byte(".")), nil
 }
 
-// readLine returns the next line without its CR LF (it may span buffers).
-func (d *Reader) readLine() ([]byte, error) {
-	line, err := d.r.ReadSlice('\n')
+// readLine reads the next line and returns it without its line end; lf is
+// false for a last line that the end of the input cut off, and err is
+// io.EOF only when nothing was left. A line longer than the bufio.Reader's
+// buffer is collected only up to maxControlLine bytes, and with header set
+// (the lines before =ybegin) only if it starts with "=ybegin ": the rest is
+// read and dropped, and long is true (for a dropped line, line is nil).
+func (d *Reader) readLine(header bool) (line []byte, lf, long bool, err error) {
+	line, err = d.r.ReadSlice('\n')
 	if err == bufio.ErrBufferFull {
-		long := append([]byte(nil), line...)
+		// the buffer holds 16 bytes or more: enough to see "=ybegin "
+		keep := !header || bytes.HasPrefix(line, []byte("=ybegin "))
+		if d.long == nil { // once, at its full size
+			d.long = make([]byte, 0, maxControlLine+3)
+		}
+		d.long = d.long[:0]
+		if keep { // up to maxControlLine+3 bytes: one more than a line may have
+			d.long = append(d.long, line[:min(len(line), maxControlLine+3)]...)
+		}
 		for err == bufio.ErrBufferFull {
 			line, err = d.r.ReadSlice('\n')
-			long = append(long, line...)
+			if keep && len(d.long) <= maxControlLine+2 { // +2: room for CR LF
+				d.long = append(d.long, line[:min(len(line), maxControlLine+3-len(d.long))]...)
+			}
 		}
-		line = long
+		if !keep {
+			line = nil
+		} else {
+			line = d.long
+		}
+		long = !keep || len(d.long) > maxControlLine+2
 	}
-	if err != nil && (err != io.EOF || len(line) == 0) {
-		return nil, err
+	if err != nil && (err != io.EOF || len(line) == 0 && !long) {
+		return nil, false, false, err
 	}
-	return bytes.TrimRight(line, "\r\n"), nil
+	if err == io.EOF { // a last line without LF
+		return line, false, long, nil
+	}
+	line = trimEOL(line)
+	return line, true, long || len(line) > maxControlLine, nil
 }
 
-// cutLine is readLine on a slice: the first line of b without its CR LF and
-// what follows it. ok is false at the end of b; like readLine, a last line
-// without LF is still a line.
-func cutLine(b []byte) (line, rest []byte, ok bool) {
-	if len(b) == 0 {
-		return nil, nil, false
-	}
+// trimEOL removes one line end: LF, or CR LF.
+func trimEOL(b []byte) []byte {
+	b = bytes.TrimSuffix(b, []byte("\n"))
+	return bytes.TrimSuffix(b, []byte("\r"))
+}
+
+// errLong is the error for a =y line longer than maxControlLine.
+func errLong(what string) error {
+	return fmt.Errorf("%w: %s line longer than %d bytes", ErrHeader, what, maxControlLine)
+}
+
+// cutLine is readLine on a slice: the first line of b without its line end,
+// what follows it, and whether it ended in LF (false: the last line of b,
+// cut off, returned as it is).
+func cutLine(b []byte) (line, rest []byte, lf bool) {
 	i := bytes.IndexByte(b, '\n')
 	if i < 0 {
-		i = len(b) - 1
+		return b, nil, false
 	}
-	return bytes.TrimRight(b[:i+1], "\r\n"), b[i+1:], true
+	return trimEOL(b[:i+1]), b[i+1:], true
 }
 
 // parseBegin reads an =ybegin line. name= comes last and runs to the end of
 // the line (it may hold spaces and "part=" etc.), so the other keys are looked
 // up only before it.
 func (m *Meta) parseBegin(line []byte) error {
+	line = bytes.TrimRight(line, "\r") // CR CR LF line ends: no CR in name= or a value
 	if i := bytes.Index(line, []byte(" name=")); i >= 0 {
 		m.Name = string(line[i+len(" name="):])
 		line = line[:i]
@@ -355,6 +417,7 @@ func (m *Meta) parseBegin(line []byte) error {
 // parsePart sets m from the line after =ybegin of a part, which must be
 // "=ypart ...".
 func (m *Meta) parsePart(line []byte) error {
+	line = bytes.TrimRight(line, "\r")
 	if !bytes.HasPrefix(line, []byte("=ypart ")) {
 		return fmt.Errorf("%w: multi-part post without =ypart line, got %q", ErrHeader, truncate(line))
 	}
@@ -377,6 +440,7 @@ func isEnd(rest []byte) bool {
 // parseEnd reads an =yend line (without its "=y"). A size= or crc32=/pcrc32=
 // that is given must be valid; endSize is -1 when size= is not given.
 func (m *Meta) parseEnd(rest []byte) (endSize int64, err error) {
+	rest = bytes.TrimRight(rest, "\r")
 	if !isEnd(rest) {
 		// another =y line inside the data (=ypart repeated?): not supported
 		return 0, fmt.Errorf("yencsimd: unexpected line =y%s", truncate(rest))
@@ -471,26 +535,35 @@ func Decode(article []byte) ([]byte, Meta, error) {
 	var m Meta
 	rest := article
 	for {
-		line, more, ok := cutLine(rest)
-		if !ok {
+		if len(rest) == 0 {
 			return []byte{}, m, ErrNoYbegin
 		}
+		line, more, lf := cutLine(rest)
 		rest = more
-		if bytes.Equal(line, []byte(".")) {
-			return []byte{}, m, ErrNoYbegin
-		}
 		if !bytes.HasPrefix(line, []byte("=ybegin ")) {
+			if bytes.Equal(line, []byte(".")) {
+				return []byte{}, m, ErrNoYbegin
+			}
 			continue
+		}
+		if !lf { // the input ends inside the =ybegin line
+			return []byte{}, m, ErrTruncated
+		}
+		if len(line) > maxControlLine {
+			return []byte{}, m, errLong("=ybegin")
 		}
 		if err := m.parseBegin(line); err != nil {
 			return []byte{}, m, err
 		}
 		if m.Part > 0 {
-			part, more, ok := cutLine(rest)
-			if !ok || bytes.Equal(part, []byte(".")) {
+			part, more, lf := cutLine(rest)
+			if !lf || bytes.Equal(part, []byte(".")) {
 				return []byte{}, m, ErrTruncated // =ybegin seen: the article was cut short
 			}
 			rest = more
+			if len(part) > maxControlLine {
+				return []byte{}, m, errLong("=ypart")
+			}
 			if err := m.parsePart(part); err != nil {
 				return []byte{}, m, err
 			}
@@ -504,9 +577,12 @@ func Decode(article []byte) ([]byte, Meta, error) {
 	if end != EndControl { // "\r\n.\r\n", or the article ends, before =yend
 		return data, m, ErrTruncated
 	}
-	line, _, ok := cutLine(rest[ns:]) // after "=y": "end size=... pcrc32=..."
-	if !ok {
+	line, _, lf := cutLine(rest[ns:]) // after "=y": "end size=... pcrc32=..."
+	if !lf {
 		return data, m, ErrTruncated
+	}
+	if len(line) > maxControlLine {
+		return data, m, errLong("=yend")
 	}
 	endSize, err := m.parseEnd(line)
 	if err != nil {
