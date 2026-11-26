@@ -21,7 +21,7 @@ const article = "=ybegin line=128 size=12 name=hello.txt\r\n" +
 func ExampleDecode() {
 	data, meta, err := yencsimd.Decode([]byte(article))
 	if err != nil {
-		fmt.Println("error:", err) // ErrCRC, ErrSize, ErrTruncated or ErrNoYbegin
+		fmt.Println("error:", err) // ErrCRC, ErrSize, ErrTruncated, ErrNoYbegin or ErrHeader
 		return
 	}
 	fmt.Printf("%s: %q (%d bytes)\n", meta.Name, data, meta.Size)

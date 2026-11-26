@@ -20,6 +20,9 @@ var (
 	ErrSize = errors.New("yencsimd: size mismatch")
 	// ErrCRC: the CRC32 of the decoded data differs from the =yend line.
 	ErrCRC = errors.New("yencsimd: crc32 mismatch")
+	// ErrHeader: a =ybegin, =ypart or =yend line has a missing or invalid
+	// value (size, part, total, begin, end, crc32 or pcrc32).
+	ErrHeader = errors.New("yencsimd: bad =y line")
 )
 
 // Meta is what the yEnc header and trailer lines say about the data.
@@ -47,12 +50,11 @@ type Meta struct {
 // dot-stuffing, and Reader would remove it a second time.
 //
 // Read returns the decoded data. At the end it checks the sizes and the
-// CRC32 and returns io.EOF, or ErrSize / ErrCRC / ErrTruncated / ErrNoYbegin.
-// By then it has read through the closing "." line (or to the end of the
-// input), so an NNTP connection is ready for its next command. A malformed
-// header (a part without an =ypart line, or another =y line in the data)
-// gives a plain error; after it the input is still inside the article, so
-// drop the connection or read to the "." line yourself.
+// CRC32 and returns io.EOF, or ErrSize / ErrCRC / ErrTruncated / ErrNoYbegin /
+// ErrHeader, or a plain error for another =y line inside the data. By then it
+// has read through the closing "." line (or to the end of the input), so an
+// NNTP connection is ready for its next command. Only a read error from the
+// underlying reader leaves the connection inside the article.
 type Reader struct {
 	r    *bufio.Reader
 	meta Meta
@@ -180,13 +182,23 @@ func (d *Reader) readHeader() error {
 		if !bytes.HasPrefix(line, []byte("=ybegin ")) {
 			continue
 		}
-		d.meta.parseBegin(line)
+		if err := d.meta.parseBegin(line); err != nil {
+			d.skipArticle()
+			return err
+		}
 		if d.meta.Part > 0 {
 			part, err := d.readLine()
+			if err == io.EOF {
+				return ErrTruncated // =ybegin seen: the article was cut short
+			}
 			if err != nil {
-				return d.eof(err)
+				return err
+			}
+			if bytes.Equal(part, []byte(".")) {
+				return ErrTruncated
 			}
 			if err := d.meta.parsePart(part); err != nil {
+				d.skipArticle()
 				return err
 			}
 		}
@@ -205,18 +217,11 @@ func (d *Reader) finish() error {
 	if err != nil {
 		return d.eof(err)
 	}
-	endSize, err := d.meta.parseEnd(rest)
-	if err != nil {
-		return err
+	endSize, err := d.meta.parseEnd(rest) // also refuses another =y line in the data
+	if err == nil {
+		err = d.meta.check(d.n, d.crc, endSize)
 	}
-	err = d.meta.check(d.n, d.crc, endSize)
-	// read through the end of the article; a plain file may just end
-	for {
-		line, rerr := d.readLine()
-		if rerr != nil || bytes.Equal(line, []byte(".")) {
-			break
-		}
-	}
+	d.skipArticle() // a plain file may just end
 	if err != nil {
 		return err
 	}
@@ -232,6 +237,18 @@ func (d *Reader) eof(err error) error {
 		return ErrNoYbegin
 	}
 	return ErrTruncated
+}
+
+// skipArticle reads through the closing "." line (or the end of the input),
+// so that after the =yend line, or an error in the yEnc lines, the
+// connection is at the next response.
+func (d *Reader) skipArticle() {
+	for {
+		line, err := d.readLine()
+		if err != nil || bytes.Equal(line, []byte(".")) {
+			return
+		}
+	}
 }
 
 // readLine returns the next line without its CR LF (it may span buffers).
@@ -265,30 +282,62 @@ func cutLine(b []byte) (line, rest []byte, ok bool) {
 	return bytes.TrimRight(b[:i+1], "\r\n"), b[i+1:], true
 }
 
-// parseBegin sets m from the "=ybegin ..." line.
-func (m *Meta) parseBegin(line []byte) {
-	m.Name = string(nameField(line))
-	m.Size = intField(line, "size")
-	m.Part = int(intField(line, "part"))
-	m.Total = int(intField(line, "total"))
+// parseBegin reads an =ybegin line. name= comes last and runs to the end of
+// the line (it may hold spaces and "part=" etc.), so the other keys are looked
+// up only before it.
+func (m *Meta) parseBegin(line []byte) error {
+	if i := bytes.Index(line, []byte(" name=")); i >= 0 {
+		m.Name = string(line[i+len(" name="):])
+		line = line[:i]
+	}
+	size, ok := intField(line, "size", 63)
+	if !ok || size < 0 {
+		return fmt.Errorf("%w: =ybegin without a valid size= in %q", ErrHeader, truncate(line))
+	}
+	m.Size = size
+	// part= is optional; when given it counts from 1
+	if _, has := field(line, "part"); has {
+		part, ok := intField(line, "part", 31)
+		if !ok || part < 1 {
+			return fmt.Errorf("%w: =ybegin part= not a part number in %q", ErrHeader, truncate(line))
+		}
+		m.Part = int(part)
+	}
+	// total= is only passed on to the caller: one that is not a part count
+	// counts as not given
+	if total, ok := intField(line, "total", 31); ok && total >= 1 {
+		m.Total = int(total)
+	}
 	m.Begin, m.End = 1, m.Size
+	return nil
 }
 
 // parsePart sets m from the line after =ybegin of a part, which must be
 // "=ypart ...".
 func (m *Meta) parsePart(line []byte) error {
 	if !bytes.HasPrefix(line, []byte("=ypart ")) {
-		return fmt.Errorf("yencsimd: multi-part post without =ypart line, got %q", truncate(line))
+		return fmt.Errorf("%w: multi-part post without =ypart line, got %q", ErrHeader, truncate(line))
 	}
-	m.Begin = intField(line, "begin")
-	m.End = intField(line, "end")
+	// begin..end is inclusive and 1-based; end = begin-1 is an empty part
+	// (a 0-byte file posted as part 1 of 1: begin=1 end=0)
+	begin, okb := intField(line, "begin", 63)
+	end, oke := intField(line, "end", 63)
+	if !okb || !oke || begin < 1 || end < begin-1 || end > m.Size {
+		return fmt.Errorf("%w: =ypart begin/end outside 1..%d in %q", ErrHeader, m.Size, truncate(line))
+	}
+	m.Begin, m.End = begin, end
 	return nil
 }
 
-// parseEnd sets the CRC from the =yend line, given without its "=y", and
-// returns the size it gives (-1 if none).
+// isEnd reports whether rest, an =y line without its "=y", is an =yend line.
+func isEnd(rest []byte) bool {
+	return bytes.Equal(rest, []byte("end")) || bytes.HasPrefix(rest, []byte("end "))
+}
+
+// parseEnd reads an =yend line (without its "=y"). A size= or crc32=/pcrc32=
+// that is given must be valid; endSize is -1 when size= is not given.
 func (m *Meta) parseEnd(rest []byte) (endSize int64, err error) {
-	if !bytes.HasPrefix(rest, []byte("end")) {
+	if !isEnd(rest) {
 		// another =y line inside the data (=ypart repeated?): not supported
 		return 0, fmt.Errorf("yencsimd: unexpected line =y%s", truncate(rest))
 	}
@@ -297,13 +346,24 @@ func (m *Meta) parseEnd(rest []byte) (endSize int64, err error) {
 		key = "pcrc32"
 	}
 	if v, ok := field(rest, key); ok {
-		if c, err := strconv.ParseUint(string(v), 16, 32); err == nil {
-			m.CRC32, m.HasCRC = uint32(c), true
+		// hex digits, upper or lower case, maybe fewer than 8; a "0x" in
+		// front is not yEnc but harmless, so it is accepted
+		if len(v) > 2 && v[0] == '0' && (v[1] == 'x' || v[1] == 'X') {
+			v = v[2:]
 		}
+		c, err := strconv.ParseUint(string(v), 16, 32)
+		if err != nil {
+			return 0, fmt.Errorf("%w: =yend %s=%q is not a CRC32", ErrHeader, key, truncate(v))
+		}
+		m.CRC32, m.HasCRC = uint32(c), true
 	}
 	endSize = -1 // not given
 	if _, ok := field(rest, "size"); ok {
-		endSize = intField(rest, "size")
+		n, ok := intField(rest, "size", 63)
+		if !ok || n < 0 {
+			return 0, fmt.Errorf("%w: =yend size= not a size in %q", ErrHeader, truncate(rest))
+		}
+		endSize = n
 	}
 	return endSize, nil
 }
@@ -340,21 +400,16 @@ func field(line []byte, key string) ([]byte, bool) {
 	return nil, false
 }
 
-func intField(line []byte, key string) int64 {
-	v, ok := field(line, key)
-	if !ok {
-		return 0
+// intField returns the decimal value of key= in line, which must fit in a
+// signed integer of bits+1 bits; ok is false when the key is missing or its
+// value is not such a number.
+func intField(line []byte, key string, bits int) (n int64, ok bool) {
+	v, has := field(line, key)
+	if !has {
+		return 0, false
 	}
-	n, _ := strconv.ParseInt(string(v), 10, 64)
-	return n
-}
-
-// nameField returns the name: the last field, which may contain spaces.
-func nameField(line []byte) []byte {
-	if i := bytes.Index(line, []byte(" name=")); i >= 0 {
-		return line[i+len(" name="):]
-	}
-	return nil
+	n, err := strconv.ParseInt(string(v), 10, bits+1)
+	return n, err == nil
 }
 
 func truncate(b []byte) []byte {
@@ -387,11 +442,13 @@ func Decode(article []byte) ([]byte, Meta, error) {
 		if !bytes.HasPrefix(line, []byte("=ybegin ")) {
 			continue
 		}
-		m.parseBegin(line)
+		if err := m.parseBegin(line); err != nil {
+			return []byte{}, m, err
+		}
 		if m.Part > 0 {
 			part, more, ok := cutLine(rest)
-			if !ok {
-				return []byte{}, m, ErrNoYbegin
+			if !ok || bytes.Equal(part, []byte(".")) {
+				return []byte{}, m, ErrTruncated // =ybegin seen: the article was cut short
 			}
 			rest = more
 			if err := m.parsePart(part); err != nil {

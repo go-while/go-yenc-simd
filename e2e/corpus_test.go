@@ -42,7 +42,8 @@ func TestCorpus(t *testing.T) {
 			case fakeserver.WantError:
 				// The decoder's own error, not a failed BODY command or a broken server.
 				if !errors.Is(err, yencsimd.ErrCRC) && !errors.Is(err, yencsimd.ErrSize) &&
-					!errors.Is(err, yencsimd.ErrTruncated) && !errors.Is(err, yencsimd.ErrNoYbegin) {
+					!errors.Is(err, yencsimd.ErrTruncated) && !errors.Is(err, yencsimd.ErrNoYbegin) &&
+					!errors.Is(err, yencsimd.ErrHeader) {
 					t.Errorf("%s: want a decoder error; got %d bytes, err %v (%s)", k.Name, len(data), err, k.Why)
 				}
 			default: // WantEither

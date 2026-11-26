@@ -18,7 +18,7 @@ import yencsimd "github.com/go-while/go-yenc-simd"
 
 data, meta, err := yencsimd.Decode(article)
 if err != nil {
-	// yencsimd.ErrCRC, ErrSize, ErrTruncated or ErrNoYbegin
+	// yencsimd.ErrCRC, ErrSize, ErrTruncated, ErrNoYbegin or ErrHeader
 }
 fmt.Println(meta.Name, len(data))
 ```
