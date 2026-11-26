@@ -67,6 +67,7 @@ type Reader struct {
 	err  error // sticky: returned once out is drained
 
 	started   bool // the =ybegin (and =ypart) lines are read
+	atEnd     bool // read through the closing "." line or to the end of the input
 	inData    bool // in the yEnc data, between the header lines and =yend
 	truncated bool // the article ended inside the data
 	state     State
@@ -104,6 +105,15 @@ func NewReader(r io.Reader) *Reader {
 
 // Meta returns what the yEnc lines said so far (see Meta).
 func (d *Reader) Meta() Meta { return d.meta }
+
+// AtEnd reports whether the Reader has read through the end of the article:
+// the closing "." line, or the end of the input. Once Read has returned
+// io.EOF or an error, false means reading from the underlying reader failed
+// and an NNTP connection is still inside the article, whatever yEnc error
+// the error also holds. True means nothing of the article is left: after the
+// "." line the connection is at the next response; if the input ended
+// instead (the server closed the connection), there is no next response.
+func (d *Reader) AtEnd() bool { return d.atEnd }
 
 // Read implements io.Reader. When p can take all that is buffered, or holds
 // 8 KiB or more, it decodes straight into p, so io.Copy (32 KiB pieces) and
@@ -166,7 +176,7 @@ func (d *Reader) step(p []byte) (int, error) {
 	case EndControl: // "=y" read: the rest of the line is "end ..." (or another =y line)
 		d.inData = false
 	case EndArticle: // ".\r\n" before =yend: return the data, then ErrTruncated
-		d.inData, d.truncated = false, true
+		d.inData, d.truncated, d.atEnd = false, true, true
 	}
 	if direct {
 		return nd, nil
@@ -183,6 +193,7 @@ func (d *Reader) readHeader() error {
 			return d.eof(err)
 		}
 		if bytes.Equal(line, []byte(".")) {
+			d.atEnd = true
 			return ErrNoYbegin
 		}
 		if !bytes.HasPrefix(line, []byte("=ybegin ")) {
@@ -193,14 +204,12 @@ func (d *Reader) readHeader() error {
 		}
 		if d.meta.Part > 0 {
 			part, err := d.readLine()
-			if err == io.EOF {
-				return ErrTruncated // =ybegin seen: the article was cut short
-			}
-			if err != nil {
+			if err != nil && err != io.EOF {
 				return err
 			}
-			if bytes.Equal(part, []byte(".")) {
-				return ErrTruncated
+			if err == io.EOF || bytes.Equal(part, []byte(".")) {
+				d.atEnd = true
+				return ErrTruncated // =ybegin seen: the article was cut short
 			}
 			if err := d.meta.parsePart(part); err != nil {
 				return d.drain(err)
@@ -236,6 +245,7 @@ func (d *Reader) eof(err error) error {
 	if err != io.EOF {
 		return err
 	}
+	d.atEnd = true
 	if !d.started {
 		return ErrNoYbegin
 	}
@@ -248,18 +258,37 @@ func (d *Reader) eof(err error) error {
 // (joined with err if both): then the connection is still inside the article.
 func (d *Reader) drain(err error) error {
 	for {
-		line, rerr := d.readLine()
+		dot, rerr := d.skipLine()
 		switch {
-		case rerr == io.EOF:
+		case dot || rerr == io.EOF:
+			d.atEnd = true
 			return err
-		case rerr != nil && err == nil:
+		case rerr == nil:
+		case err == nil:
 			return rerr
-		case rerr != nil:
+		default:
 			return errors.Join(err, rerr)
-		case bytes.Equal(line, []byte(".")):
-			return err
 		}
 	}
+}
+
+// skipLine reads past the next line and reports whether it was the "." line.
+// A line longer than the bufio.Reader's buffer is read a buffer at a time and
+// dropped, not collected: a broken or hostile article can't make drain hold
+// it. At the end of the input it returns io.EOF (a last line without LF
+// included; drain ends there either way).
+func (d *Reader) skipLine() (dot bool, err error) {
+	line, err := d.r.ReadSlice('\n')
+	if err == bufio.ErrBufferFull {
+		for err == bufio.ErrBufferFull {
+			_, err = d.r.ReadSlice('\n')
+		}
+		return false, err // nil after a long line, io.EOF or a read error
+	}
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(bytes.TrimRight(line, "\r\n"), []byte(".")), nil
 }
 
 // readLine returns the next line without its CR LF (it may span buffers).

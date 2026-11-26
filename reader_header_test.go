@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -128,8 +129,12 @@ func TestHeaderValues(t *testing.T) {
 				{"Reader, connection", bufio.NewReader(strings.NewReader(c.article + "223 next response\r\n"))},
 				{"Reader, connection, bytewise", bufio.NewReaderSize(iotest.OneByteReader(strings.NewReader(c.article+"223 next response\r\n")), 16)},
 			} {
-				_, err := io.ReadAll(NewReader(conn.br))
+				d := NewReader(conn.br)
+				_, err := io.ReadAll(d)
 				check(conn.how, err)
+				if !d.AtEnd() {
+					t.Fatalf("%s: AtEnd() = false after err %v", conn.how, err)
+				}
 				if rest, _ := io.ReadAll(conn.br); string(rest) != "223 next response\r\n" {
 					t.Fatalf("%s: left on the connection: %q", conn.how, rest)
 				}
@@ -159,6 +164,11 @@ func TestDrainReadError(t *testing.T) {
 		{name: "after =yending", input: strings.Replace(noDot, "=yend size=", "=yending size=", 1), text: "unexpected line =yending"},
 		{name: "in the data after a bad size=", input: strings.Replace(good, "=ybegin line=128 size=5000 ", "=ybegin line=128 size=x ", 1)[:len(good)/2], want: ErrHeader},
 		{name: "in the data after a bad =ypart", input: strings.Replace(mp, "=ypart begin=1001 end=2000", "=ypart begin=0 end=999", 1)[:len(mp)/2], want: ErrHeader},
+		// not in the drain, but AtEnd must be false there too
+		{name: "before =ybegin", input: "Subject: x\r\n"},
+		{name: "on the =ypart line", input: mp[:strings.Index(mp, "=ypart")+5]},
+		{name: "in the data", input: good[:len(good)/2]},
+		{name: "on the =yend line", input: good[:strings.Index(good, "=yend")+6]},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			for _, r := range []struct {
@@ -168,11 +178,58 @@ func TestDrainReadError(t *testing.T) {
 				{"whole", io.MultiReader(strings.NewReader(c.input), iotest.ErrReader(errRead))},
 				{"bytewise", iotest.OneByteReader(io.MultiReader(strings.NewReader(c.input), iotest.ErrReader(errRead)))},
 			} {
-				_, err := io.ReadAll(NewReader(r.r))
+				d := NewReader(r.r)
+				_, err := io.ReadAll(d)
+				if d.AtEnd() {
+					t.Fatalf("%s: AtEnd() = true after err %v", r.how, err)
+				}
 				if !errors.Is(err, errRead) || c.want != nil && !errors.Is(err, c.want) ||
 					err != nil && !strings.Contains(err.Error(), c.text) {
 					t.Fatalf("%s: err = %v, want %v and %v %q", r.how, err, errRead, c.want, c.text)
 				}
+			}
+		})
+	}
+}
+
+// TestDrainLongLine checks that Reader reads on to the "." line past a line
+// far longer than its buffer without collecting it: after a bad =ybegin
+// (where the data that follows is skipped) and after =yend (a long trailer
+// line), a 4 MiB line must not cost 4 MiB.
+func TestDrainLongLine(t *testing.T) {
+	data := randomData(11, 1000)
+	good := singlePart(data, "x.bin")
+	long := strings.Repeat("x", 4<<20) + "\r\n"
+	noDot := strings.TrimSuffix(good, ".\r\n")
+	badBegin := strings.Replace(noDot, "=ybegin line=128 size=1000 ", "=ybegin line=128 size=x ", 1)
+	if badBegin == noDot {
+		t.Fatal("test setup: =ybegin line not found")
+	}
+	for _, c := range []struct {
+		name, article string
+		want          error // nil: decodes
+	}{
+		{"after a bad =ybegin", badBegin + long + ".\r\n", ErrHeader},
+		{"after =yend", noDot + long + ".\r\n", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			br := bufio.NewReaderSize(strings.NewReader(c.article+"223 next response\r\n"), 4<<10)
+			d := NewReader(br)
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			_, err := io.ReadAll(d)
+			runtime.ReadMemStats(&after)
+			if c.want == nil && err != nil || c.want != nil && !errors.Is(err, c.want) {
+				t.Fatalf("err = %v, want %v", err, c.want)
+			}
+			if !d.AtEnd() {
+				t.Fatal("AtEnd() = false")
+			}
+			if rest, _ := io.ReadAll(br); string(rest) != "223 next response\r\n" {
+				t.Fatalf("left on the connection: %q", rest)
+			}
+			if n := after.TotalAlloc - before.TotalAlloc; n > 1<<20 {
+				t.Fatalf("reading on to the . line allocated %d bytes", n)
 			}
 		})
 	}

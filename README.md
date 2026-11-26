@@ -48,11 +48,18 @@ meta := d.Meta()                // Name, Size, Part, Total, Begin, End, CRC32
 `NewReader` reads through the closing `.` line, so the connection is ready
 for the next command, also after a yEnc error such as `ErrCRC`. The one
 exception is an error from the connection itself (a timeout, a reset): then
-the article was not read to its end, so close the connection rather than
-reuse it. That error may come joined with a yEnc error, so check for it
-first (any error that is not one of the yencsimd errors; for example
-`var ne net.Error; errors.As(err, &ne)` for timeouts and resets), before
-`errors.Is(err, yencsimd.ErrCRC)` and the like.
+the article was not read to its end. That error may come joined with a yEnc
+error, so ask the Reader rather than the error:
+
+```go
+if err != nil && !d.AtEnd() {
+	conn.Close() // still inside the article: don't send the next command
+}
+```
+
+(`AtEnd` is also true when the server closed the connection mid-article:
+`Read` gives `ErrTruncated`, and the next command fails on the closed
+connection.)
 
 `io.Copy` writes the data before the size and the CRC at the end are checked:
 when it returns an error, throw away what it wrote.
@@ -96,6 +103,36 @@ your own, as above, and refuse the part if it is beyond it. With `Reader`,
 the same holds for `d.Meta()` once `Read` has returned `io.EOF`.
 
 For a part, the CRC checked is the `pcrc32=` of that part.
+
+## Header values
+
+`ErrHeader` refuses posts whose yEnc lines break the spec in ways that could
+give wrong data, a wrong place in the file, or no CRC check:
+
+- `=ybegin` without `size=`, or with a size that is not a number of 0 or more;
+- `part=` that is 0, negative or not a number;
+- `=ypart` without `begin=` or `end=`, `begin=0`, `end=` less than
+  `begin=`-1 (`end=` = `begin=`-1 is an empty part, as for a 0-byte file), or
+  `end=` beyond the `=ybegin` `size=` (an encoder that puts the part's size
+  there instead of the file's);
+- a `crc32=` (`pcrc32=` on a part) that is empty or not hex, and a `=yend`
+  `size=` that is not a number of 0 or more;
+- `size=` only after `name=`: `name=` comes last and runs to the end of the
+  line, so keys after it are part of the name;
+- another line where a multi-part post needs its `=ypart` line (a `.` line
+  or the end of the input there gives `ErrTruncated`).
+
+Up to v0.1.2 some of these decoded: `begin=0`, an `end=` beyond `size=`, a
+bad CRC value (the CRC was then not checked), `size=` after `name=`, and a
+`part=` that is 0, negative or not a number on a post without `=ypart` (it
+was taken as single-part). Two
+more forms decoded then and now give a plain error, as other `=y` lines in
+the data do: `part=` after `name=` (the post is single-part, so its `=ypart`
+line lands in the data), and a line such as `=yending` in place of `=yend`.
+
+Odd forms that harm nothing still decode: upper-case hex, a CRC without
+leading zeros or with `0x`, `part=` without `total=`, an invalid `total=`
+(ignored), and a missing `crc32=`/`pcrc32=` (the CRC is then not checked).
 
 ## Build with SIMD
 
