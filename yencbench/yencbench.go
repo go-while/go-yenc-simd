@@ -52,7 +52,8 @@ func Measure(o Options) ([]Result, error) {
 	if kernels == nil {
 		kernels = yencsimd.Kernels()
 	}
-	defer yencsimd.SetKernel(yencsimd.Kernels()[0])
+	prev := yencsimd.Kernel() // what the caller had set, not the fastest
+	defer yencsimd.SetKernel(prev)
 
 	random := article(o.Size, 7, func(r *rand.Rand, i int) byte { return byte(r.Uint32()) })
 	plain := article(o.Size, 9, func(r *rand.Rand, i int) byte { return plainByte(r) })
