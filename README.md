@@ -50,7 +50,8 @@ for the next command, also after a yEnc error such as `ErrCRC`. The one
 exception is an error from the connection itself (a timeout, a reset): then
 the article was not read to its end, so close the connection rather than
 reuse it. That error may come joined with a yEnc error, so check for it
-first (for example `var ne net.Error; errors.As(err, &ne)`), before
+first (any error that is not one of the yencsimd errors; for example
+`var ne net.Error; errors.As(err, &ne)` for timeouts and resets), before
 `errors.Is(err, yencsimd.ErrCRC)` and the like.
 
 `io.Copy` writes the data before the size and the CRC at the end are checked:
@@ -230,7 +231,8 @@ GOEXPERIMENT=simd go test -run '^$' -bench . -benchtime 1s
   line at a time, and 8 connections at once. nntp-testkit's corpus of odd and
   broken posts is fetched too, each checked against the outcome the corpus
   gives for it: decoded with the right data, refused with one of the
-  decoder's errors (the corpus does not say which), or either. rapidyenc's decoder checks the encoder.
+  decoder's errors (the corpus does not say which), or either. rapidyenc's
+  decoder checks the encoder.
 
 ```sh
 GOEXPERIMENT=simd go test ./...

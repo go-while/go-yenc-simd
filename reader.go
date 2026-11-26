@@ -14,16 +14,18 @@ import (
 var (
 	// ErrNoYbegin: the article ended before a "=ybegin" line.
 	ErrNoYbegin = errors.New("yencsimd: no =ybegin line")
-	// ErrTruncated: the article ended inside the yEnc data, before "=yend".
+	// ErrTruncated: the article ended after "=ybegin" but before "=yend"
+	// (also where a multi-part post needs its "=ypart" line).
 	ErrTruncated = errors.New("yencsimd: article ends before =yend")
 	// ErrSize: the decoded size differs from the =ybegin/=ypart/=yend sizes.
 	ErrSize = errors.New("yencsimd: size mismatch")
 	// ErrCRC: the CRC32 of the decoded data differs from the =yend line.
 	ErrCRC = errors.New("yencsimd: crc32 mismatch")
-	// ErrHeader: =ybegin has no size=, a =ybegin, =ypart or =yend line has
-	// an invalid value (size, part, begin, end, or the crc32/pcrc32 that is
-	// checked), or another line comes where a multi-part post needs =ypart.
-	// part=, crc32=, pcrc32= and =yend size= may be left out.
+	// ErrHeader: =ybegin has no size=, =ypart has no begin= or end=, a
+	// =ybegin, =ypart or =yend line has an invalid value (size, part, begin,
+	// end, or the crc32/pcrc32 that is checked), or another line comes where
+	// a multi-part post needs =ypart. part=, crc32=, pcrc32= and =yend size=
+	// may be left out; an invalid total= is ignored.
 	ErrHeader = errors.New("yencsimd: bad =y line")
 )
 
