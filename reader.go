@@ -21,7 +21,8 @@ var (
 	// ErrCRC: the CRC32 of the decoded data differs from the =yend line.
 	ErrCRC = errors.New("yencsimd: crc32 mismatch")
 	// ErrHeader: a =ybegin, =ypart or =yend line has a missing or invalid
-	// value (size, part, total, begin, end, crc32 or pcrc32).
+	// value (size, part, begin, end, crc32 or pcrc32), or a multi-part post
+	// has no =ypart line.
 	ErrHeader = errors.New("yencsimd: bad =y line")
 )
 
@@ -54,7 +55,9 @@ type Meta struct {
 // ErrHeader, or a plain error for another =y line inside the data. By then it
 // has read through the closing "." line (or to the end of the input), so an
 // NNTP connection is ready for its next command. Only a read error from the
-// underlying reader leaves the connection inside the article.
+// underlying reader leaves the connection inside the article; Read returns it,
+// also when it comes while reading on to the "." line (then joined with the
+// error above, if any, so errors.Is finds both).
 type Reader struct {
 	r    *bufio.Reader
 	meta Meta
@@ -183,8 +186,7 @@ func (d *Reader) readHeader() error {
 			continue
 		}
 		if err := d.meta.parseBegin(line); err != nil {
-			d.skipArticle()
-			return err
+			return d.drain(err)
 		}
 		if d.meta.Part > 0 {
 			part, err := d.readLine()
@@ -198,8 +200,7 @@ func (d *Reader) readHeader() error {
 				return ErrTruncated
 			}
 			if err := d.meta.parsePart(part); err != nil {
-				d.skipArticle()
-				return err
+				return d.drain(err)
 			}
 		}
 		d.started, d.inData = true, true
@@ -221,8 +222,7 @@ func (d *Reader) finish() error {
 	if err == nil {
 		err = d.meta.check(d.n, d.crc, endSize)
 	}
-	d.skipArticle() // a plain file may just end
-	if err != nil {
+	if err := d.drain(err); err != nil { // a plain file may just end
 		return err
 	}
 	return io.EOF
@@ -239,14 +239,22 @@ func (d *Reader) eof(err error) error {
 	return ErrTruncated
 }
 
-// skipArticle reads through the closing "." line (or the end of the input),
-// so that after the =yend line, or an error in the yEnc lines, the
-// connection is at the next response.
-func (d *Reader) skipArticle() {
+// drain reads through the closing "." line (or to the end of the input), so
+// that after the =yend line, or an error in the yEnc lines, the connection is
+// at the next response. It returns err, or a read error that stopped it
+// (joined with err if both): then the connection is still inside the article.
+func (d *Reader) drain(err error) error {
 	for {
-		line, err := d.readLine()
-		if err != nil || bytes.Equal(line, []byte(".")) {
-			return
+		line, rerr := d.readLine()
+		switch {
+		case rerr == io.EOF:
+			return err
+		case rerr != nil && err == nil:
+			return rerr
+		case rerr != nil:
+			return errors.Join(err, rerr)
+		case bytes.Equal(line, []byte(".")):
+			return err
 		}
 	}
 }

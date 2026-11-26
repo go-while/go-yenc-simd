@@ -137,3 +137,41 @@ func TestHeaderValues(t *testing.T) {
 		})
 	}
 }
+
+// TestDrainReadError checks that a read error while Reader reads on to the
+// closing "." line (after =yend, or after an error in the yEnc lines) is
+// returned, joined with the yEnc error if there is one, and not hidden behind
+// io.EOF or that error: the connection is then still inside the article.
+func TestDrainReadError(t *testing.T) {
+	errRead := errors.New("read timeout")
+	data := randomData(9, 5000)
+	good := singlePart(data, "x.bin")
+	noDot := strings.TrimSuffix(good, ".\r\n")
+	file := randomData(10, 3000)
+	mp := multiPart(file, 2, 3, 1001, 2000)
+	for _, c := range []struct {
+		name, input string
+		want        error // besides errRead; nil: only errRead
+	}{
+		{name: "after a good =yend", input: noDot},
+		{name: "after a bad crc32=", input: strings.Replace(noDot, fmt.Sprintf("crc32=%08x", crc32.ChecksumIEEE(data)), "crc32=00000000", 1), want: ErrCRC},
+		{name: "after =yending", input: strings.Replace(noDot, "=yend size=", "=yending size=", 1)},
+		{name: "in the data after a bad size=", input: strings.Replace(good, "=ybegin line=128 size=5000 ", "=ybegin line=128 size=x ", 1)[:len(good)/2], want: ErrHeader},
+		{name: "in the data after a bad =ypart", input: strings.Replace(mp, "=ypart begin=1001 end=2000", "=ypart begin=0 end=999", 1)[:len(mp)/2], want: ErrHeader},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for _, r := range []struct {
+				how string
+				r   io.Reader
+			}{
+				{"whole", io.MultiReader(strings.NewReader(c.input), iotest.ErrReader(errRead))},
+				{"bytewise", iotest.OneByteReader(io.MultiReader(strings.NewReader(c.input), iotest.ErrReader(errRead)))},
+			} {
+				_, err := io.ReadAll(NewReader(r.r))
+				if !errors.Is(err, errRead) || c.want != nil && !errors.Is(err, c.want) {
+					t.Fatalf("%s: err = %v, want %v and %v", r.how, err, errRead, c.want)
+				}
+			}
+		})
+	}
+}
