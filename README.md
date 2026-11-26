@@ -65,15 +65,21 @@ Each article is one part. `Meta` says where it goes:
 
 ```go
 data, meta, err := yencsimd.Decode(article)
+if err != nil {
+	return err // data may be incomplete or not match Begin..End
+}
 // meta.Part of meta.Total, bytes meta.Begin..meta.End (1-based, inclusive)
 // of a file of meta.Size bytes
 f.WriteAt(data, meta.Begin-1)
 ```
 
-Decode and Reader check that `Begin..End` lies inside `1..Size`, but `size=`
-comes from the post too: before `WriteAt`, check that `meta.Size` is the same
-in every part of the file (and is the size you expect, if you know it), so a
-broken or hostile post can't make you write far past the end of the file.
+Decode and Reader check that `1 <= Begin` and `End <= Size`, but `size=`
+comes from the post too, and a hostile poster can give every part the same
+inflated `size=`. Parts that disagree on `meta.Size` show a broken post, but
+agreeing parts prove nothing. Only a limit you trust bounds the write: write a
+part only when `err == nil` (then `len(data)` is `End-Begin+1`), and before
+`WriteAt` check `meta.End` against the file size you expect or a maximum of
+your own, and refuse the part if it is beyond it.
 
 For a part, the CRC checked is the `pcrc32=` of that part.
 
